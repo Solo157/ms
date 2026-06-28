@@ -1,1 +1,3 @@
-# ms
+# socialnetwork
+
+mvn clean package
