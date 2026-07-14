@@ -1,0 +1,9 @@
+spring:
+  application:
+    name: client-service
+
+user-service:
+  url: http://user-service:8081
+
+server:
+  port: 8082
