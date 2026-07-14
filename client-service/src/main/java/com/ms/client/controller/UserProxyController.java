@@ -11,37 +11,42 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@RequestMapping("/users")
+@RequestMapping()
 public class UserProxyController {
 
     private final UserClientService userClientService;
+
+    @GetMapping("/health")
+    public ResponseEntity<Map<String, String>> health() {
+        return ResponseEntity.status(HttpStatus.OK).body(Map.of("status", "OK"));
+    }
 
     public UserProxyController(UserClientService userClientService) {
         this.userClientService = userClientService;
     }
 
-    @GetMapping
+    @GetMapping("/users")
     public List<UserDTO> getAllUsers() {
         return userClientService.getAllUsers();
     }
 
-    @GetMapping("/{id}")
+    @GetMapping("/users/{id}")
     public UserDTO getUserById(@PathVariable Long id) {
         return userClientService.getUserById(id);
     }
 
-    @PostMapping
+    @PostMapping("/users")
     public ResponseEntity<UserDTO> createUser(@RequestBody UserDTO userDTO) {
         UserDTO created = userClientService.createUser(userDTO);
         return ResponseEntity.status(HttpStatus.CREATED).body(created);
     }
 
-    @PutMapping("/{id}")
+    @PutMapping("/users/{id}")
     public UserDTO updateUser(@PathVariable Long id, @RequestBody UserDTO userDTO) {
         return userClientService.updateUser(id, userDTO);
     }
 
-    @DeleteMapping("/{id}")
+    @DeleteMapping("/users/{id}")
     public ResponseEntity<Void> deleteUser(@PathVariable Long id) {
         return userClientService.deleteUser(id);
     }
