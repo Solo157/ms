@@ -1,0 +1,64 @@
+# Minimal but functional monitoring for the OTUS demo.
+# Installs Prometheus, Grafana, Alertmanager, node-exporter, kube-state-metrics.
+# Kept small: no HA, no long retention, no autoscaling.
+
+alertmanager:
+  enabled: true
+  alertmanagerSpec:
+    resources:
+      requests: { cpu: 10m, memory: 64Mi }
+
+grafana:
+  enabled: true
+  adminPassword: admin            # demo only; override via CI in "real" use
+  resources:
+    requests: { cpu: 20m, memory: 128Mi }
+  # Expose Grafana through nginx-ingress (host injected by the pipeline as $GRAFANA_HOST).
+  ingress:
+    enabled: true
+    ingressClassName: nginx
+    hosts:
+      - PLACEHOLDER_GRAFANA_HOST
+    paths:
+      - /
+    pathType: Prefix
+  # Register Loki as a datasource so logs are queryable in the same Grafana.
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.monitoring.svc.cluster.local:3100
+      isDefault: false
+
+prometheus:
+  enabled: true
+  prometheusSpec:
+    retention: 2d                 # demo-sized
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+    storageSpec: {}               # ephemeral PVC not required for the demo
+    # Discover ServiceMonitors / PodMonitors from ALL namespaces and labels,
+    # so application metrics work without per-release label matching.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    serviceMonitorNamespaceSelector: {}
+    podMonitorNamespaceSelector: {}
+
+nodeExporter:
+  enabled: true
+  resources:
+    requests: { cpu: 10m, memory: 32Mi }
+
+kube-state-metrics:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+
+kubelet:
+  enabled: true
+  serviceMonitor: true
+
+# Turn a couple of baseline alerts on so Alertmanager has something to show.
+defaultRules:
+  create: true
+additionalAlertmanagerConfigs: []

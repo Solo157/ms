@@ -1,0 +1,167 @@
+# Infrastructure pipeline. Runs only when infrastructure files change:
+# terraform/**, helm/monitoring/**, kubernetes/**, and this file.
+#
+# COURSE CONSTRAINT: the first-ever apply cannot run on the yc-runner that this
+# pipeline itself creates. Bootstrap cloud-infrastructure locally / on a
+# temporary runner ONE time (see README). Later runs use the persistent runner.
+
+.infra-rules: &infra-rules
+  - changes:
+      - terraform/**/*
+      - helm/monitoring/**/*
+      - kubernetes/**/*
+      - .gitlab/ci/infrastructure.yml
+
+.tf-base:
+  image:
+    name: hashicorp/terraform:1.9
+    entrypoint: [""]
+  rules: *infra-rules
+  variables:
+    TF_IN_AUTOMATION: "1"
+    TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.terraform.d/plugin-cache"
+    TF_STATE_ACCESS: >-
+      -backend-config=bucket=$TF_STATE_BUCKET
+      -backend-config=access_key=$YC_ACCESS_KEY_ID
+      -backend-config=secret_key=$YC_SECRET_ACCESS_KEY
+  cache:
+    key: tf-plugin-cache
+    paths: [.terraform.d/plugin-cache]
+
+# ============================ cloud-infrastructure (state 1) ================
+tf-cloud-fmt:
+  extends: .tf-base
+  stage: validate
+  script:
+    - cd terraform
+    - terraform fmt -check -recursive -diff
+
+tf-cloud-validate:
+  extends: .tf-base
+  stage: validate
+  needs: [tf-cloud-fmt]
+  script:
+    - cd terraform/cloud-infrastructure
+    - terraform init -backend=false
+    - terraform validate
+
+tf-cloud-plan:
+  extends: .tf-base
+  stage: plan
+  needs: [tf-cloud-validate]
+  script:
+    - cd terraform/cloud-infrastructure
+    - terraform init -reconfigure $TF_STATE_ACCESS
+    - terraform plan -out=tfplan
+  artifacts:
+    when: always
+    paths: [terraform/cloud-infrastructure/tfplan]
+    expire_in: 1 day
+
+tf-cloud-apply:
+  extends: .tf-base
+  stage: apply
+  needs: [tf-cloud-plan]
+  when: manual
+  allow_failure: false
+  resource_group: cloud-infrastructure
+  environment: { name: prod/infrastructure }
+  script:
+    - cd terraform/cloud-infrastructure
+    - terraform init -reconfigure $TF_STATE_ACCESS
+    - terraform apply -input=false tfplan
+    - |
+      {
+        echo "CLUSTER_ID=$(terraform output -raw cluster_id)"
+        echo "CLUSTER_NAME=$(terraform output -raw cluster_name)"
+        echo "REGISTRY_HOST=$(terraform output -raw registry_host)"
+      } > cluster.env
+  artifacts:
+    reports:
+      dotenv: cluster.env
+
+# ================= Kubernetes access bootstrap + agent (state 2) ============
+# yc uses the VM/instance Service Account token via the IMDS (169.254...).
+# host networking is required to reach IMDS from the job container.
+k8s-bootstrap:
+  stage: bootstrap
+  image:
+    name: mirrorru/yandex-cloud-cli:latest
+    entrypoint: [""]
+  rules: *infra-rules
+  needs: [tf-cloud-apply]
+  variables:
+    GIT_STRATEGY: none
+    DOCKER_NETWORK_MODE: host
+  script:
+    - yc --version || true
+    - export YC_CLOUD_ID YC_FOLDER_ID
+    - yc managed-kubernetes cluster list --folder-id "$YC_FOLDER_ID"
+    - yc managed-kubernetes cluster get-credentials --id "$CLUSTER_ID" --new
+    - mkdir -p "$CI_PROJECT_DIR/.kube"
+    - cp "$HOME/.kube/config" "$CI_PROJECT_DIR/.kube/config"
+  artifacts:
+    paths: [.kube/config]
+    expire_in: 1 hour
+
+tf-k8s-apply:
+  # Creates namespaces (dev/prod/monitoring) and installs the GitLab Agent
+  # (gitlab_cluster_agent + token + helm gitlab-agent) using the bootstrap kubeconfig.
+  extends: .tf-base
+  stage: apply
+  needs: [k8s-bootstrap, tf-cloud-apply]
+  when: manual
+  allow_failure: false
+  resource_group: kubernetes
+  variables:
+    TF_VAR_kubeconfig_path: "$CI_PROJECT_DIR/.kube/config"
+    TF_VAR_cluster_name: "$CLUSTER_NAME"
+    TF_VAR_gitlab_project_path: "$CI_PROJECT_PATH"
+  script:
+    - cd terraform/kubernetes
+    - terraform init -reconfigure $TF_STATE_ACCESS
+    - terraform apply -auto-approve
+    - echo "KUBE_CONTEXT=gitlab:$CI_PROJECT_PATH/otus-agent" > kube.env
+  artifacts:
+    reports:
+      dotenv: kube.env
+
+# ============================== Monitoring & logging =======================
+install-monitoring:
+  stage: bootstrap
+  image:
+    name: dtzar/helm-kubectl:3
+    entrypoint: [""]
+  rules: *infra-rules
+  needs: [tf-k8s-apply, k8s-bootstrap]
+  # need repo files for the chart values, but NOT a fresh kubeconfig (we reuse the artifact)
+  dependencies: [tf-k8s-apply, k8s-bootstrap]
+  environment: { name: monitoring }
+  script:
+    - cp "$CI_PROJECT_DIR/.kube/config" "$HOME/.kube/config"   # bootstrap creds
+    - export KUBECONFIG="$HOME/.kube/config"
+    - kubectl get nodes
+    - helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+    - helm repo add prometheus-ce https://prometheus-community.github.io/helm-charts
+    - helm repo add grafana https://grafana.github.io/helm-charts
+    - helm repo update
+    - kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -
+    - helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx
+        -n ingress-nginx --create-namespace
+        -f helm/monitoring/values-ingress-nginx.yaml --wait --timeout 10m
+    - helm upgrade --install monitoring prometheus-ce/kube-prometheus-stack
+        -n monitoring -f helm/monitoring/values-kube-prometheus-stack.yaml --wait
+    - helm upgrade --install loki grafana/loki -n monitoring
+        -f helm/monitoring/values-loki.yaml --wait
+    - helm upgrade --install alloy grafana/alloy -n monitoring
+        -f helm/monitoring/values-alloy.yaml --wait
+    # Discover the ingress LoadBalancer IP and export host values for the app.
+    - |
+      LB=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+            -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+      echo "INGRESS_LB_IP=$LB" >> deploy.env
+      echo "GRAFANA_HOST=grafana.$LB.nip.io" >> deploy.env
+      echo "APP_HOST=app.$LB.nip.io" >> deploy.env
+  artifacts:
+    reports:
+      dotenv: deploy.env

@@ -1,0 +1,10 @@
+environment: dev
+# DEV runs its own PostgreSQL and uses db `users_db_dev`.
+postgres:
+  enabled: true
+db:
+  name: users_db_dev
+userService:
+  replicas: 1
+clientService:
+  replicas: 1

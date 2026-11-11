@@ -1,0 +1,28 @@
+# Copy to terraform.tfvars and fill in. NEVER commit terraform.tfvars with real
+# secrets. Preferred in CI: pass secrets via masked/protected CI variables
+# (TF_VAR_*) and non-secret ids via -var-file or TF_VAR_*.
+
+name              = "otus-ms"
+
+# Yandex Cloud — non-secret identifiers, use your real values (do not invent):
+yc_cloud_id       = "<YC_CLOUD_ID>"
+yc_folder_id      = "<YC_FOLDER_ID>"
+# yc_token is SECRET — in CI pass it as masked TF_VAR_yc_token, never here.
+# yc_token                  = "<YC_IAM_OR_OAUTH_TOKEN>"
+
+# GitLab (self-managed) — non-secret url + numeric project id:
+gitlab_base_url   = "https://vasyukov-158.gitlab.yandexcloud.net"
+gitlab_project_id = "<GITLAB_PROJECT_ID>"
+# gitlab_token is SECRET — pass as masked TF_VAR_gitlab_token in CI.
+# gitlab_token              = "<GITLAB_PAT_WITH_API_SCOPE>"
+
+subnet_cidrs      = ["10.10.0.0/24", "10.10.1.0/24"]
+zones             = ["ru-central1-a", "ru-central1-b"]
+
+registry_name     = "otus-ms-registry"
+node_count        = 2
+node_cores        = 4
+node_memory       = 8
+
+# Optional — SSH public key to debug the runner VM ("ubuntu:ssh-rsa AAAA..."):
+# ssh_public_key  = ""

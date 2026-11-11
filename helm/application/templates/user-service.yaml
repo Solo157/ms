@@ -1,0 +1,82 @@
+{{- if .Values.userService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.userService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    app: {{ .Values.userService.name }}
+spec:
+  replicas: {{ .Values.userService.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.userService.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.userService.name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.userService.port }}"
+        prometheus.io/path: "/actuator/prometheus"
+        redeploy-timestamp: "{{ now | unixEpoch }}"
+    spec:
+      containers:
+        - name: {{ .Values.userService.name }}
+          image: "{{ .Values.image.registry }}/{{ .Values.userService.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.userService.port }}
+          env:
+            - name: SPRING_DATASOURCE_URL
+              value: {{ include "ms.datasourceUrl" . | quote }}
+            - name: SPRING_DATASOURCE_USERNAME
+              valueFrom:
+                secretKeyRef: { name: {{ include "ms.dbSecretName" . }}, key: username }
+            - name: SPRING_DATASOURCE_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: {{ include "ms.dbSecretName" . }}, key: password }
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: {{ .Values.userService.port }} }
+            initialDelaySeconds: 15
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: {{ .Values.userService.port }} }
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.userService.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.userService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    app: {{ .Values.userService.name }}
+spec:
+  selector:
+    app: {{ .Values.userService.name }}
+  ports:
+    - name: http
+      port: {{ .Values.userService.port }}
+      targetPort: {{ .Values.userService.port }}
+---
+{{- if .Values.metrics.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.userService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    {{- toYaml .Values.metrics.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.userService.name }}
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+{{- end }}
+{{- end }}

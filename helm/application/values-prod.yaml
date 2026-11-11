@@ -1,0 +1,16 @@
+environment: prod
+image:
+  pullPolicy: IfNotPresent
+# PROD reuses the single PostgreSQL instance deployed by DEV (same cluster),
+# with a separate logical database and its own credentials Secret in this namespace.
+postgres:
+  enabled: false
+db:
+  host: postgres.dev.svc.cluster.local
+  name: users_db_prod
+  user: postgres
+  password: postgres
+userService:
+  replicas: 2
+clientService:
+  replicas: 2

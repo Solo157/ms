@@ -1,0 +1,28 @@
+#cloud-config
+package_update: true
+write_files:
+  - path: /etc/otus-gitlab-runner-token
+    permissions: "0600"
+    content: ${token}
+runcmd:
+  - apt-get update -y
+  - apt-get install -y docker.io docker-compose-v2 ca-certificates curl jq
+  - systemctl enable --now docker
+  - curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | bash
+  - apt-get install -y gitlab-runner
+  - usermod -aG docker gitlab-runner
+  - >
+    gitlab-runner register
+    --non-interactive
+    --url "${gitlab_url}"
+    --token "$(cat /etc/otus-gitlab-runner-token)"
+    --executor docker
+    --description "${description}"
+    --tag-list "${tag_list}"
+    --docker-image docker:27-cli
+    --docker-network-mode host
+    --docker-volumes "/var/run/docker.sock:/var/run/docker.sock"
+  - rm -f /etc/otus-gitlab-runner-token
+  - systemctl enable --now gitlab-runner
+  # Report runner online status back to journal for smoke-checking.
+  - sleep 5 && journalctl -u gitlab-runner --no-pager | tail -n 20

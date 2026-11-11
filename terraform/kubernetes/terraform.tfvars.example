@@ -1,0 +1,15 @@
+# Copy to terraform.tfvars. IDs from cloud-infrastructure outputs; secrets via
+# TF_VAR_* in CI (masked). NEVER commit real values.
+
+kubeconfig_path      = "~/.kube/config"   # produced by:
+                                          #   yc managed-kubernetes cluster get-credentials --id <cluster> --new
+
+yc_folder_id         = "<YC_FOLDER_ID>"
+# yc_token            = "<YC_IAM_OR_OAUTH_TOKEN>"      # TF_VAR_yc_token (masked)
+cluster_name         = "otus-ms-cluster"
+
+gitlab_base_url      = "https://vasyukov-158.gitlab.yandexcloud.net"
+# gitlab_token        = "<GITLAB_PAT_WITH_API_SCOPE>"  # TF_VAR_gitlab_token (masked)
+gitlab_project_path  = "devops/devops-otus-app/ms"
+
+agent_name           = "otus-agent"

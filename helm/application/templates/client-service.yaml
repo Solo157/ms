@@ -1,0 +1,77 @@
+{{- if .Values.clientService.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.clientService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    app: {{ .Values.clientService.name }}
+spec:
+  replicas: {{ .Values.clientService.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.clientService.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.clientService.name }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.clientService.port }}"
+        prometheus.io/path: "/actuator/prometheus"
+        redeploy-timestamp: "{{ now | unixEpoch }}"
+    spec:
+      containers:
+        - name: {{ .Values.clientService.name }}
+          image: "{{ .Values.image.registry }}/{{ .Values.clientService.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.clientService.port }}
+          env:
+            # binds to com.ms.client.config.UserServiceProperties (prefix user-service)
+            - name: USER_SERVICE_URL
+              value: "http://{{ .Values.userService.name }}:{{ .Values.userService.port }}"
+          readinessProbe:
+            httpGet: { path: /actuator/health/readiness, port: {{ .Values.clientService.port }} }
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /actuator/health/liveness, port: {{ .Values.clientService.port }} }
+            initialDelaySeconds: 20
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.clientService.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.clientService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    app: {{ .Values.clientService.name }}
+spec:
+  selector:
+    app: {{ .Values.clientService.name }}
+  ports:
+    - name: http
+      port: {{ .Values.clientService.port }}
+      targetPort: {{ .Values.clientService.port }}
+---
+{{- if .Values.metrics.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Values.clientService.name }}
+  labels:
+    {{- include "ms.labels" . | nindent 4 }}
+    {{- toYaml .Values.metrics.labels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app: {{ .Values.clientService.name }}
+  endpoints:
+    - port: http
+      path: /actuator/prometheus
+      interval: 30s
+{{- end }}
+{{- end }}

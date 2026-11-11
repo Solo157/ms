@@ -1,0 +1,79 @@
+# Grafana Alloy as a DaemonSet collecting container logs from the node's
+# /var/log/pods and pushing them to Loki through the API-free hostPath route
+# (self-contained, no extra RBAC). This is intentionally simple for the demo.
+controller:
+  type: daemonset
+
+alloy:
+  mountPaths:
+    varlog: /var/log
+  extraConfigs: {}
+  config: |
+    logging {
+      level  = "info"
+      format = "logfmt"
+    }
+
+    loki.write "loki_gateway" {
+      endpoint {
+        url = "http://loki.monitoring.svc.cluster.local:3100/loki/api/v1/push"
+      }
+    }
+
+    # All container log files on the node.
+    local.file_match "pod_logs" {
+      path_targets = [{
+        __path__ = "/var/log/pods/*/*/*.log",
+      }]
+    }
+
+    # Extract namespace / pod / container from the standardized path:
+    #   /var/log/pods/<ns>_<pod>_<uid>/<container>/<n>.log
+    discovery.relabel "pod_logs" {
+      targets = local.file_match.pod_logs.targets
+
+      rule {
+        source_labels = ["__path__"]
+        regex         = "/var/log/pods/([^_]+)_([^_]+)_[^/]+/([^/]+)/.*"
+        replacement   = "$1"
+        target_label  = "namespace"
+      }
+      rule {
+        source_labels = ["__path__"]
+        regex         = "/var/log/pods/([^_]+)_([^_]+)_[^/]+/([^/]+)/.*"
+        replacement   = "$2"
+        target_label  = "pod"
+      }
+      rule {
+        source_labels = ["__path__"]
+        regex         = "/var/log/pods/([^_]+)_([^_]+)_[^/]+/([^/]+)/.*"
+        replacement   = "$3"
+        target_label  = "container"
+      }
+    }
+
+    loki.source.file "pod_logs" {
+      targets = discovery.relabel.pod_logs.output
+      forward_to = [loki.process.pod_logs.receiver]
+    }
+
+    # Drop the noisy relabeling scratch labels, keep the useful stream labels.
+    loki.process "pod_logs" {
+      stage.labeldrop = ["__path__", "filename", "job", "instance"]
+      forward_to = [loki.write.loki_gateway.receiver]
+    }
+
+# HostPath volume so /var/log/pods is visible to Alloy on every node.
+additionalVolumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+      type: Directory
+
+additionalMounts:
+  - name: varlog
+    mountPath: /var/log
+    readOnly: true
+
+resources:
+  requests: { cpu: 20m, memory: 128Mi }

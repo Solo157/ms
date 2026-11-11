@@ -1,0 +1,127 @@
+# Application pipeline: build -> test -> docker -> deploy dev -> smoke ->
+# (manual) deploy prod with the SAME image tag. Uses the GitLab Agent (KUBE_CONTEXT).
+#
+# Required project CI/CD variables (see README):
+#   YC_REGISTRY_HOST  (e.g. cr.yandex/<registry-id>)
+#   KUBE_CONTEXT      (gitlab:<project-path>/otus-agent)
+
+.app-rules: &app-rules
+  - changes:
+      - application/**/*
+      - helm/application/**/*
+      - .gitlab/ci/application.yml
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  MAVEN_CLI_OPTS: "--batch-mode --errors --fail-at-end -ntp"
+
+.maven-cache: &maven-cache
+  key: maven-repo
+  paths: [.m2/repository]
+
+mvn-build:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    <<: *maven-cache
+    policy: pull-push
+  rules: *app-rules
+  script:
+    - cd application
+    - mvn $MAVEN_CLI_OPTS -DskipTests package
+  artifacts:
+    paths:
+      - application/user-service/target/app.jar
+      - application/client-service/target/app.jar
+    expire_in: 1 day
+
+mvn-test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  cache:
+    <<: *maven-cache
+    policy: pull
+  rules: *app-rules
+  script:
+    - cd application
+    - mvn $MAVEN_CLI_OPTS test
+
+# Build/push with the VM instance Service Account (registry push rights) through
+# IMDS — host networking is required to reach 169.254.169.254 from a container.
+docker-build:
+  stage: package
+  image: docker:27-cli
+  needs: [mvn-build]
+  timeout: 30m
+  rules: *app-rules
+  variables:
+    DOCKER_TLS_CERTDIR: ""
+    DOCKER_NETWORK_MODE: host
+  before_script:
+    - YCR_TOKEN=$(curl -s -H "Metadata-Flavor: Google"
+        http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token
+        | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+    - echo "$YCR_TOKEN" | docker login cr.yandex -u iam-token --password-stdin
+  script:
+    - cd application
+    - docker build -t "$YC_REGISTRY_HOST/ms-user-service:$CI_COMMIT_SHA" user-service
+    - docker build -t "$YC_REGISTRY_HOST/ms-client-service:$CI_COMMIT_SHA" client-service
+    - docker push "$YC_REGISTRY_HOST/ms-user-service:$CI_COMMIT_SHA"
+    - docker push "$YC_REGISTRY_HOST/ms-client-service:$CI_COMMIT_SHA"
+
+# Common config for the KAS-based deploy/verify jobs.
+.deploy-base:
+  image:
+    name: dtzar/helm-kubectl:3
+    entrypoint: [""]
+  variables:
+    KUBE_CONTEXT: gitlab:$CI_PROJECT_PATH/otus-agent
+  before_script:
+    - LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller
+          -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    - test -n "$LB"
+    - export APP_URL="http://app.$LB.nip.io"
+    - echo "Ingress LB=$LB  APP_URL=$APP_URL"
+
+deploy-dev:
+  stage: deploy-dev
+  extends: .deploy-base
+  needs: [docker-build]
+  rules: *app-rules
+  environment: { name: dev }
+  script:
+    - helm upgrade --install ms-dev helm/application -n dev
+        -f helm/application/values.yaml -f helm/application/values-dev.yaml
+        --set image.registry="$YC_REGISTRY_HOST" --set image.tag="$CI_COMMIT_SHA"
+        --set ingress.host="app.$LB.nip.io" --wait --timeout 5m
+
+smoke-test-dev:
+  stage: verify
+  extends: .deploy-base
+  needs: [deploy-dev]
+  rules: *app-rules
+  script:
+    - 'curl -fsS "$APP_URL/health"'
+    - 'curl -fsS "$APP_URL/users" -o /dev/null'
+
+review-prod:
+  stage: verify
+  image: alpine:latest
+  when: manual
+  allow_failure: false
+  rules: *app-rules
+  script:
+    - echo "Manual approval to promote image $CI_COMMIT_SHA from DEV to PROD."
+
+deploy-prod:
+  stage: deploy-prod
+  extends: .deploy-base
+  needs: [deploy-dev, smoke-test-dev, review-prod]
+  environment: { name: production }
+  rules: *app-rules
+  # Same image tag as DEV — never re-built.
+  script:
+    - helm upgrade --install ms-prod helm/application -n prod
+        -f helm/application/values.yaml -f helm/application/values-prod.yaml
+        --set image.registry="$YC_REGISTRY_HOST" --set image.tag="$CI_COMMIT_SHA"
+        --set ingress.host="app.$LB.nip.io" --wait --timeout 5m
