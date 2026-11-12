@@ -63,6 +63,7 @@ stages:
     changes:
       - "application/**/*"
       - "helm/application/**/*"
+      - "Makefile"
   - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
     changes:
       - "terraform/**/*"
@@ -73,6 +74,7 @@ stages:
     changes:
       - "application/**/*"
       - "helm/application/**/*"
+      - "Makefile"
 
 # --- Terraform ---------------------------------------------------------------
 .tf-base:

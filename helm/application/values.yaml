@@ -1,6 +1,6 @@
 # Значения чарта приложения. Всё, что меняется между запусками/реестрами,
-# подставляет CI через --set (см. Makefile app-deploy). Имена и порты сервисов —
-# константы и записаны прямо в шаблонах.
+# подставляет CI через --set (см. Makefile app-deploy). Имена, порты и ресурсы
+# сервисов заданы в блоках userService/clientService.
 
 image:
   registry: registry.example.com/ms   # CI: --set image.registry=$CI_REGISTRY_IMAGE
@@ -18,14 +18,22 @@ registry:
 ingress:
   host: PLACEHOLDER_HOST
 
-user:
+userService:
+  name: user-service
+  port: 8081
   replicas: 1
+  image:
+    repository: ms-user-service
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
 
-client:
+clientService:
+  name: client-service
+  port: 8082
   replicas: 1
+  image:
+    repository: ms-client-service
   resources:
     requests: { cpu: 50m, memory: 192Mi }
     limits:   { cpu: 300m, memory: 384Mi }

@@ -1,28 +1,28 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: user-service
+  name: {{ .Values.userService.name }}
   labels:
-    app: user-service
+    app: {{ .Values.userService.name }}
 spec:
-  replicas: {{ .Values.user.replicas }}
+  replicas: {{ .Values.userService.replicas }}
   selector:
     matchLabels:
-      app: user-service
+      app: {{ .Values.userService.name }}
   template:
     metadata:
       labels:
-        app: user-service
+        app: {{ .Values.userService.name }}
     spec:
       imagePullSecrets:
         - name: {{ .Values.registry.secretName }}
       containers:
-        - name: user-service
-          image: "{{ .Values.image.registry }}/ms-user-service:{{ .Values.image.tag }}"
+        - name: {{ .Values.userService.name }}
+          image: "{{ .Values.image.registry }}/{{ .Values.userService.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
-              containerPort: 8081
+              containerPort: {{ .Values.userService.port }}
           # In-memory H2 — внешний источник данных не нужен.
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: 8081 }
@@ -33,32 +33,32 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.user.resources | nindent 12 }}
+            {{- toYaml .Values.userService.resources | nindent 12 }}
 ---
 apiVersion: v1
 kind: Service
 metadata:
-  name: user-service
+  name: {{ .Values.userService.name }}
   labels:
-    app: user-service
+    app: {{ .Values.userService.name }}
 spec:
   selector:
-    app: user-service
+    app: {{ .Values.userService.name }}
   ports:
     - name: http
-      port: 8081
-      targetPort: 8081
+      port: {{ .Values.userService.port }}
+      targetPort: {{ .Values.userService.port }}
 ---
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
-  name: user-service
+  name: {{ .Values.userService.name }}
   labels:
-    app: user-service
+    app: {{ .Values.userService.name }}
 spec:
   selector:
     matchLabels:
-      app: user-service
+      app: {{ .Values.userService.name }}
   endpoints:
     - port: http
       path: /actuator/prometheus
