@@ -1,41 +1,31 @@
-# Общие значения чарта. Тег/registry/username/password подставляет
-# пайплайн через --set (см. CI и Makefile).
-image:
-  registry: registry.example.com/ms     # placeholder; CI: --set image.registry=$CI_REGISTRY_IMAGE
-  tag: latest                           # CI: --set image.tag=$CI_COMMIT_SHA
-  pullPolicy: IfNotPresent
+# Значения чарта приложения. Всё, что меняется между запусками/реестрами,
+# подставляет CI через --set (см. Makefile app-deploy). Имена и порты сервисов —
+# константы и записаны прямо в шаблонах.
 
-# Docker-registry Secret для скачивания приватных образов из GitLab Registry.
-# server/username/password подставляет CI (deploy token read_registry, masked --set).
-# Secret создаётся всегда.
+image:
+  registry: registry.example.com/ms   # CI: --set image.registry=$CI_REGISTRY_IMAGE
+  tag: latest                         # CI: --set image.tag=$CI_COMMIT_SHA
+
+# Secret gitlab-registry (kubernetes.io/dockerconfigjson) создаётся всегда.
+# Значения подставляет CI: deploy-токен read_registry (CI_DEPLOY_USER/PASSWORD).
 registry:
   server: ""
   username: ""
   password: ""
   secretName: gitlab-registry
 
-userService:
-  name: user-service
-  port: 8081
+# Хост приложения: LB ingress-nginx + nip.io, подставляет CI.
+ingress:
+  host: PLACEHOLDER_HOST
+
+user:
   replicas: 1
-  image:
-    repository: ms-user-service
   resources:
     requests: { cpu: 100m, memory: 256Mi }
     limits:   { cpu: 500m, memory: 512Mi }
 
-clientService:
-  name: client-service
-  port: 8082
+client:
   replicas: 1
-  image:
-    repository: ms-client-service
   resources:
     requests: { cpu: 50m, memory: 192Mi }
     limits:   { cpu: 300m, memory: 384Mi }
-
-# Хост приложения подставляет пайплайн (LB ingress-nginx + nip.io).
-ingress:
-  className: nginx
-  host: PLACEHOLDER_HOST
-  path: /

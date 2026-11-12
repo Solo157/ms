@@ -1,23 +1,17 @@
-# Единый pipeline проекта: сначала инфраструктура (Terraform + кластерные
-# компоненты), затем приложение (build -> test -> image -> deploy).
+# Единый pipeline: сначала инфраструктура (Terraform + кластерные компоненты),
+# затем приложение (build -> test -> image -> deploy).
 #
-# Разделение запуска — только через rules:changes:
+# Разделение запуска — только rules:changes:
 #   - правка Java/чарта приложения НЕ запускает Terraform;
 #   - правка Terraform/мониторинга НЕ пересобирает приложение.
-# terraform_apply остаётся manual и сам не стартует.
+# terraform_apply — manual, запускается только вручную.
 #
-# В обычном прикладном пайплайне кластер считается уже развёрнутым (см. README):
-#jobs деплоя не зависят от инфраструктурных jobs и берут ingress-nginx IP из
-# уже работающего кластера. При ПЕРВОМ развёртывании — сначала infra-pipeline
-# (apply -> bootstrap -> infrastructure), потом обычный прикладной push.
-#
-# Переменные CI (значения и типы — в README): YC_CLOUD_ID, YC_FOLDER_ID,
-# YC_SA_KEY (File), TF_STATE_BUCKET, YC_ACCESS_KEY_ID, YC_SECRET_ACCESS_KEY,
-# GITLAB_AGENT_TOKEN (glagent-...), GITLAB_KAS_ADDRESS.
+# В обычном прикладном пайплайне кластер считается развёрнутым: job'ы деплоя
+# берут IP ingress-nginx из уже работающего кластера. При ПЕРВОМ развёртывании
+# сначала прогоняется инфраструктурный пайплайн, затем отдельный push приложения.
 
 workflow:
   rules:
-    # Не плодить branch-pipeline, когда для той же ветки открыт MR.
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
@@ -41,53 +35,61 @@ stages:
   - image
   - deploy
 
-# --- Правила запуска (rules:changes) -----------------------------------------
-.infra-changes: &infra_changes
-  - "terraform/**/*"
-  - "helm/monitoring/**/*"
-  - ".gitlab/agents/otus-agent/config.yaml"
-
-.app-changes: &app_changes
-  - "application/**/*"
-  - "helm/application/**/*"
-
-# Инфраструктурные jobs поднимаются только при изменении инфраструктуры.
+# --- Правила запуска ---------------------------------------------------------
+# Инфраструктурные jobs — только при изменении инфраструктуры.
 .infra-rules: &infra_rules
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes: *infra_changes
+    changes:
+      - "terraform/**/*"
+      - "helm/monitoring/**/*"
+      - ".gitlab/agents/otus-agent/config.yaml"
   - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes: *infra_changes
+    changes:
+      - "terraform/**/*"
+      - "helm/monitoring/**/*"
+      - ".gitlab/agents/otus-agent/config.yaml"
 
-# Прикладные jobs — только при изменении приложения, и только если в том же
-# коммите НЕ тронута инфраструктура. Иначе пайплайн мог бы задеплоить
-# приложение в ещё не подготовленный кластер.
+# Прикладные jobs — только при изменении приложения и только если в том же
+# коммите не менялась инфраструктура. Иначе приложение может задеплоиться в ещё
+# не подготовленный кластер.
 .app-rules: &app_rules
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes: *infra_changes
+    changes:
+      - "terraform/**/*"
+      - "helm/monitoring/**/*"
+      - ".gitlab/agents/otus-agent/config.yaml"
     when: never
   - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes: *app_changes
+    changes:
+      - "application/**/*"
+      - "helm/application/**/*"
   - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes: *infra_changes
+    changes:
+      - "terraform/**/*"
+      - "helm/monitoring/**/*"
+      - ".gitlab/agents/otus-agent/config.yaml"
     when: never
   - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes: *app_changes
+    changes:
+      - "application/**/*"
+      - "helm/application/**/*"
 
 # --- Terraform ---------------------------------------------------------------
 .tf-base:
   image:
     name: hashicorp/terraform:1.9
     entrypoint: [""]
-  workdir: terraform
   rules: *infra_rules
   variables:
-    TF_IN_AUTOMATION:      "1"
-    TF_VAR_yc_cloud_id:    "$YC_CLOUD_ID"
-    TF_VAR_yc_folder_id:   "$YC_FOLDER_ID"
+    TF_IN_AUTOMATION:     "1"
+    TF_VAR_yc_cloud_id:   "$YC_CLOUD_ID"
+    TF_VAR_yc_folder_id:  "$YC_FOLDER_ID"
   before_script:
-    # YC_SA_KEY — File-переменная, GitLab положил JSON ключ на временный путь.
+    # YC_SA_KEY — переменная типа File: GitLab сохраняет JSON-ключ во временный
+    # файл и возвращает путь к нему.
     - export YC_SERVICE_ACCOUNT_KEY_FILE="$YC_SA_KEY"
-    # Object Storage креды — через env AWS SDK (в стейт не пишутся).
+    # Ключи Object Storage передаём через переменные окружения AWS SDK (в state
+    # они не попадают).
     - export AWS_ACCESS_KEY_ID="$YC_ACCESS_KEY_ID"
     - export AWS_SECRET_ACCESS_KEY="$YC_SECRET_ACCESS_KEY"
 
@@ -95,7 +97,8 @@ terraform_validate:
   extends: .tf-base
   stage: validate
   script:
-    - terraform fmt -check -recursive
+    - cd terraform
+    - terraform fmt -check
     - terraform init -backend=false
     - terraform validate
 
@@ -103,11 +106,14 @@ terraform_plan:
   extends: .tf-base
   stage: plan
   script:
+    - cd terraform
     - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
     - terraform plan -out=tfplan
-  artifacts: { paths: ["terraform/tfplan"] }
+  artifacts:
+    paths:
+      - terraform/tfplan
 
-# terraform_apply — manual. CLUSTER_ID идёт дальше по pipeline через dotenv.
+# terraform_apply — manual. CLUSTER_ID идёт в job установки агента через dotenv.
 terraform_apply:
   extends: .tf-base
   stage: apply
@@ -116,15 +122,17 @@ terraform_apply:
   environment: { name: infrastructure }
   resource_group: terraform
   script:
+    - cd terraform
     - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
     - terraform apply -input=false tfplan
     - echo "CLUSTER_ID=$(terraform output -raw cluster_id)" > cluster.env
   artifacts:
-    reports: { dotenv: terraform/cluster.env }
+    reports:
+      dotenv: terraform/cluster.env
 
 # --- Bootstrap: установка GitLab Agent ---------------------------------------
-# Временный kubeconfig: 0600, содержимое в лог не печатается, удаляется в
-# after_script. Дальше весь доступ к K8s — через GitLab Agent + KUBE_CONTEXT.
+# Временный kubeconfig (0600, из лога скрыт, удаляется в after_script). Дальше
+# доступ к K8s — только через GitLab Agent и KUBE_CONTEXT.
 install_gitlab_agent:
   stage: bootstrap
   image:
@@ -179,28 +187,26 @@ install_cluster_components:
     - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
     - helm repo add grafana https://grafana.github.io/helm-charts
     - helm repo update
-    # ingress-nginx дождаться внешнего IP LB (нужен для nip.io-хостов ниже).
+    # ingress-nginx: дождаться внешнего IP LB (нужен для nip.io-хостов ниже).
     - |
       helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
         -n ingress-nginx --create-namespace --version 4.15.1 \
         -f helm/monitoring/values-ingress-nginx.yaml --wait --timeout 10m
-      kubectl --context "$KUBE_CONTEXT" -n ingress-nginx \
-        wait --for=jsonpath='{.status.loadBalancer.ingress}' \
+      kubectl --context "$KUBE_CONTEXT" -n ingress-nginx wait \
+        --for=jsonpath='{.status.loadBalancer.ingress}' \
         svc/ingress-nginx-controller --timeout=5m
       LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-    # kube-prometheus-stack. Ждём CRD monitor.coreos.com — под ServiceMonitor
-    # приложения.
+    # kube-prometheus-stack: дождаться готовности CRD мониторинга — они нужны для
+    # ServiceMonitor'ов приложения.
     - |
       helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
         -n monitoring --create-namespace --version 69.8.2 \
         -f helm/monitoring/values-kube-prometheus-stack.yaml \
         --set "grafana.ingress.hosts[0]=grafana.$LB.nip.io" \
         --wait --timeout 10m
-      for crd in servicemonitors podmonitors scrapeconfigs; do
-        kubectl --context "$KUBE_CONTEXT" wait --for=condition=Established \
-          "crd/$crd.monitoring.coreos.com" --timeout=2m
-      done
+      kubectl --context "$KUBE_CONTEXT" wait --for=condition=Established \
+        crd/servicemonitors.monitoring.coreos.com --timeout=2m
     # Loki + Alloy (namespace logging).
     - |
       helm upgrade --install loki grafana/loki \
@@ -212,8 +218,7 @@ install_cluster_components:
         -f helm/monitoring/values-alloy.yaml --wait --timeout 5m
 
 # --- Приложение --------------------------------------------------------------
-# Команды сборки/деплоя живут в Makefile (единая точка входа и для CI, и для
-# локального запуска). Alpine-образы ниже не содержат make/curl — ставим их.
+# Все команды — в Makefile. В Alpine-образах ниже make/curl ставятся отдельно.
 build_application:
   stage: build
   image: maven:3.9-eclipse-temurin-21
@@ -235,12 +240,13 @@ test_application:
   script:
     - make test
 
+# Публикация образов — только после успешных сборки И тестов.
 build_images:
   stage: image
   image: docker:27
   services: [docker:27-dind]
   rules: *app_rules
-  needs: [build_application]
+  needs: [build_application, test_application]
   timeout: 30m
   before_script:
     - apk add --no-cache make
@@ -249,8 +255,8 @@ build_images:
   script:
     - make docker-build docker-push
 
-# Деплой через GitLab Agent (KUBE_CONTEXT). Кластер и ingress считаются
-# развёрнутыми (см. правила app-rules и README).
+# Деплой через GitLab Agent. Считается, что кластер, ingress и его внешний IP
+# уже подготовлены (см. правила app_rules).
 deploy_application:
   stage: deploy
   image:
@@ -268,5 +274,5 @@ deploy_application:
       LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
              -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
       test -n "$LB"
-      export INGRESS_HOST="app.$LB.nip.io"   # тот же nip.io-хост, что и Grafana
+      export INGRESS_HOST="app.$LB.nip.io"
       make app-deploy app-smoke

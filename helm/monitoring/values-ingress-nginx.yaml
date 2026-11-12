@@ -1,12 +1,12 @@
-# nginx-ingress: контроллер получает внешний (YC) LoadBalancer IP. Этот IP — база
-# для nip.io: каждый демо-хост это <имя>.<LB-IP>.nip.io, например
-#   grafana.<IP>.nip.io, app.<IP>.nip.io  (nip.io резолвит *.IP.nip.io -> IP).
+# nginx-ingress: контроллер получает внешний IP (YC LoadBalancer). На этом IP
+# строятся адреса демо через nip.io: service.<IP>.nip.io, например
+#   grafana.<IP>.nip.io, app.<IP>.nip.io  (nip.io переводит адрес вида IP.nip.io в этот IP).
 controller:
   replicaCount: 1
   service:
     type: LoadBalancer
     annotations:
-      # yc load balancer: выставим idle timeout достаточно долгий для SSE Grafana.
+      # TLS на балансировщике YC не включаем: демо работает по HTTP.
       yandex.cloud/ssl-enabled: "false"
   resources:
     requests: { cpu: 20m, memory: 90Mi }

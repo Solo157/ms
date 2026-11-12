@@ -1,6 +1,7 @@
-# Grafana Loki в одноподном (SingleBinary / Monolithic) режиме с одной репликой и
-# локальным файловым хранилищем (демо). Релиз — в namespace `logging`, Service
-# `loki` :3100. Немасштабируемо (нет backend/read/write) — для задачи курса ок.
+# Grafana Loki в одноподном (SingleBinary / Monolithic) режиме: одна реплика,
+# локальное файловое хранилище (демо). Ставится в namespace `logging`, Service
+# `loki` на порту 3100. Отдельные backend/read/write не используются — для учебной
+# задачи этого достаточно.
 loki:
   commonConfig:
     replication_factor: 1
@@ -30,8 +31,9 @@ singleBinary:
     enabled: true
     size: 5Gi
 
-# Отдельно-масштабируемые компоненты выключены (в одноподном режиме не нужны).
-# В new Loki helm-чарте их replicas тоже должны быть 0 — иначе валидация чарта ругается.
+# Отдельно масштабируемые компоненты выключены — в одноподном режиме они не нужны.
+# В новом Loki helm-чарте их replicas тоже обязаны быть 0, иначе проверка чарта не
+# проходит.
 backend:
   replicas: 0
 read:

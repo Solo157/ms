@@ -1,52 +1,36 @@
-# Минимальный, но рабочий мониторинг для OTUS-демо.
-# Ставит Prometheus, Grafana, kube-state-metrics, node-exporter, kubelet.
-# Релиз ставится в namespace `monitoring`; без HA/долгого хранения/автоскейлинга.
-# Alertmanager отключен: Prometheus+Grafana достаточно для сбора и визуализации.
+# Prometheus + Grafana + kube-state-metrics + node-exporter. Без отказоустойчивости
+# и долгого хранения. Alertmanager отключён: для демо достаточно сбора и визуализации.
 
 alertmanager:
   enabled: false
 
 grafana:
-  enabled: true
-  adminPassword: admin            # только для демо; в «реале» переопределять в CI
+  adminPassword: admin              # только для демо; в настоящем окружении — секрет
   resources:
     requests: { cpu: 20m, memory: 128Mi }
-  # Grafana наружу через nginx-ingress (хост подставляет пайплайн как $GRAFANA_HOST).
   ingress:
     enabled: true
     ingressClassName: nginx
     hosts:
-      - PLACEHOLDER_GRAFANA_HOST
-    paths:
-      - /
+      - PLACEHOLDER_GRAFANA_HOST     # CI: --set grafana.ingress.hosts[0]=...
+    paths: [ / ]
     pathType: Prefix
-  # Регистрируем Loki (namespace logging) источником данных, чтобы логи были в
-  # той же Grafana. URL согласован с именем релиза/namespace (см. install-cluster-
-  # components): Service `loki` в monitoring->logging = loki.logging.svc.
   additionalDataSources:
     - name: Loki
       type: loki
       access: proxy
       url: http://loki.logging.svc.cluster.local:3100
-      isDefault: false
 
 prometheus:
-  enabled: true
   prometheusSpec:
-    retention: 2d                 # размер под демо
+    retention: 2d
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-    storageSpec: {}               # ephemeral PVC для демо не нужен
-    # Ищем ServiceMonitors / PodMonitors во всех namespace и со всеми лейблами,
-    # чтобы метрики приложения работали без совпадения лейблов release.
+    # Искать ServiceMonitor во всех namespace и не смотреть на метки релиза —
+    # иначе метрики приложения из namespace dev не соберутся.
     serviceMonitorSelectorNilUsesHelmValues: false
-    podMonitorSelectorNilUsesHelmValues: false
-    ruleSelectorNilUsesHelmValues: false
-    serviceMonitorNamespaceSelector: {}
-    podMonitorNamespaceSelector: {}
 
 nodeExporter:
-  enabled: true
   resources:
     requests: { cpu: 10m, memory: 32Mi }
 
@@ -54,9 +38,5 @@ kube-state-metrics:
   resources:
     requests: { cpu: 10m, memory: 64Mi }
 
-# kubelet-метрики и cAdvisor включены в чарте по умолчанию — здесь не трогаем.
-
-# Alertmanager полностью отключён — правил алертов и конфигураций AM не создаём.
 defaultRules:
   create: false
-
