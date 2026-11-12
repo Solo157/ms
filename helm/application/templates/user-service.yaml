@@ -1,4 +1,3 @@
-{{- if .Values.userService.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,21 +20,15 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         redeploy-timestamp: "{{ now | unixEpoch }}"
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.registry.secretName }}
       containers:
         - name: {{ .Values.userService.name }}
           image: "{{ .Values.image.registry }}/{{ .Values.userService.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           ports:
             - containerPort: {{ .Values.userService.port }}
-          env:
-            - name: SPRING_DATASOURCE_URL
-              value: {{ include "ms.datasourceUrl" . | quote }}
-            - name: SPRING_DATASOURCE_USERNAME
-              valueFrom:
-                secretKeyRef: { name: {{ include "ms.dbSecretName" . }}, key: username }
-            - name: SPRING_DATASOURCE_PASSWORD
-              valueFrom:
-                secretKeyRef: { name: {{ include "ms.dbSecretName" . }}, key: password }
+          # In-memory H2 — внешний источник данных не требуется, ENV не задаём.
           readinessProbe:
             httpGet: { path: /actuator/health/readiness, port: {{ .Values.userService.port }} }
             initialDelaySeconds: 15
@@ -62,14 +55,15 @@ spec:
       port: {{ .Values.userService.port }}
       targetPort: {{ .Values.userService.port }}
 ---
-{{- if .Values.metrics.enabled }}
+# Prometheus release = kube-prometheus (константа проекта) — ServiceMonitor подхватывается.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ .Values.userService.name }}
   labels:
     {{- include "ms.labels" . | nindent 4 }}
-    {{- toYaml .Values.metrics.labels | nindent 4 }}
+    app: {{ .Values.userService.name }}
+    release: kube-prometheus
 spec:
   selector:
     matchLabels:
@@ -78,5 +72,3 @@ spec:
     - port: http
       path: /actuator/prometheus
       interval: 30s
-{{- end }}
-{{- end }}

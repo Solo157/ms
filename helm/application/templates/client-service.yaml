@@ -1,4 +1,3 @@
-{{- if .Values.clientService.enabled }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +20,8 @@ spec:
         prometheus.io/path: "/actuator/prometheus"
         redeploy-timestamp: "{{ now | unixEpoch }}"
     spec:
+      imagePullSecrets:
+        - name: {{ .Values.registry.secretName }}
       containers:
         - name: {{ .Values.clientService.name }}
           image: "{{ .Values.image.registry }}/{{ .Values.clientService.image.repository }}:{{ .Values.image.tag }}"
@@ -28,7 +29,7 @@ spec:
           ports:
             - containerPort: {{ .Values.clientService.port }}
           env:
-            # binds to com.ms.client.config.UserServiceProperties (prefix user-service)
+            # биндится на com.ms.client.config.UserServiceProperties (префикс user-service)
             - name: USER_SERVICE_URL
               value: "http://{{ .Values.userService.name }}:{{ .Values.userService.port }}"
           readinessProbe:
@@ -57,14 +58,15 @@ spec:
       port: {{ .Values.clientService.port }}
       targetPort: {{ .Values.clientService.port }}
 ---
-{{- if .Values.metrics.enabled }}
+# Prometheus release = kube-prometheus (константа проекта) — ServiceMonitor подхватывается.
 apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: {{ .Values.clientService.name }}
   labels:
     {{- include "ms.labels" . | nindent 4 }}
-    {{- toYaml .Values.metrics.labels | nindent 4 }}
+    app: {{ .Values.clientService.name }}
+    release: kube-prometheus
 spec:
   selector:
     matchLabels:
@@ -73,5 +75,3 @@ spec:
     - port: http
       path: /actuator/prometheus
       interval: 30s
-{{- end }}
-{{- end }}

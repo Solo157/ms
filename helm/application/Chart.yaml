@@ -1,6 +1,6 @@
 apiVersion: v2
 name: ms-application
-description: OTUS demo app - user-service + client-service (+ in-cluster PostgreSQL)
+description: OTUS demo app - user-service + client-service (in-memory H2)
 type: application
 version: 0.1.0
 appVersion: "1.0"

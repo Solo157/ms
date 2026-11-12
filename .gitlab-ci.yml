@@ -1,13 +1,23 @@
-# Two independent pipelines in one project:
-#   - Infrastructure (Terraform + cluster bootstrap + monitoring) on terraform/
-#     helm/monitoring/**, kubernetes/** changes.
-#   - Application (build/test/package/deploy) on application/** and
-#     helm/application/** changes.
-# rules:changes below keeps a Java change from ever triggering `terraform apply`.
+# Единый pipeline проекта: сначала инфраструктура (Terraform + кластерные
+# компоненты), затем приложение (build -> test -> image -> deploy).
+#
+# Разделение запуска — только через rules:changes:
+#   - правка Java/чарта приложения НЕ запускает Terraform;
+#   - правка Terraform/мониторинга НЕ пересобирает приложение.
+# terraform_apply остаётся manual и сам не стартует.
+#
+# В обычном прикладном пайплайне кластер считается уже развёрнутым (см. README):
+#jobs деплоя не зависят от инфраструктурных jobs и берут ingress-nginx IP из
+# уже работающего кластера. При ПЕРВОМ развёртывании — сначала infra-pipeline
+# (apply -> bootstrap -> infrastructure), потом обычный прикладной push.
+#
+# Переменные CI (значения и типы — в README): YC_CLOUD_ID, YC_FOLDER_ID,
+# YC_SA_KEY (File), TF_STATE_BUCKET, YC_ACCESS_KEY_ID, YC_SECRET_ACCESS_KEY,
+# GITLAB_AGENT_TOKEN (glagent-...), GITLAB_KAS_ADDRESS.
 
 workflow:
   rules:
-    # Skip duplicate branch pipeline when an MR is open for the same branch.
+    # Не плодить branch-pipeline, когда для той же ветки открыт MR.
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
     - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
       when: never
@@ -16,20 +26,247 @@ workflow:
 
 default:
   tags: [yc-runner]
-  interruptible: true
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
 
 stages:
   - validate
   - plan
   - apply
   - bootstrap
+  - infrastructure
   - build
   - test
-  - package
-  - deploy-dev
-  - verify
-  - deploy-prod
+  - image
+  - deploy
 
-include:
-  - local: .gitlab/ci/infrastructure.yml
-  - local: .gitlab/ci/application.yml
+# --- Правила запуска (rules:changes) -----------------------------------------
+.infra-changes: &infra_changes
+  - "terraform/**/*"
+  - "helm/monitoring/**/*"
+  - ".gitlab/agents/otus-agent/config.yaml"
+
+.app-changes: &app_changes
+  - "application/**/*"
+  - "helm/application/**/*"
+
+# Инфраструктурные jobs поднимаются только при изменении инфраструктуры.
+.infra-rules: &infra_rules
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    changes: *infra_changes
+  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+    changes: *infra_changes
+
+# Прикладные jobs — только при изменении приложения, и только если в том же
+# коммите НЕ тронута инфраструктура. Иначе пайплайн мог бы задеплоить
+# приложение в ещё не подготовленный кластер.
+.app-rules: &app_rules
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    changes: *infra_changes
+    when: never
+  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    changes: *app_changes
+  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+    changes: *infra_changes
+    when: never
+  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+    changes: *app_changes
+
+# --- Terraform ---------------------------------------------------------------
+.tf-base:
+  image:
+    name: hashicorp/terraform:1.9
+    entrypoint: [""]
+  workdir: terraform
+  rules: *infra_rules
+  variables:
+    TF_IN_AUTOMATION:      "1"
+    TF_VAR_yc_cloud_id:    "$YC_CLOUD_ID"
+    TF_VAR_yc_folder_id:   "$YC_FOLDER_ID"
+  before_script:
+    # YC_SA_KEY — File-переменная, GitLab положил JSON ключ на временный путь.
+    - export YC_SERVICE_ACCOUNT_KEY_FILE="$YC_SA_KEY"
+    # Object Storage креды — через env AWS SDK (в стейт не пишутся).
+    - export AWS_ACCESS_KEY_ID="$YC_ACCESS_KEY_ID"
+    - export AWS_SECRET_ACCESS_KEY="$YC_SECRET_ACCESS_KEY"
+
+terraform_validate:
+  extends: .tf-base
+  stage: validate
+  script:
+    - terraform fmt -check -recursive
+    - terraform init -backend=false
+    - terraform validate
+
+terraform_plan:
+  extends: .tf-base
+  stage: plan
+  script:
+    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
+    - terraform plan -out=tfplan
+  artifacts: { paths: ["terraform/tfplan"] }
+
+# terraform_apply — manual. CLUSTER_ID идёт дальше по pipeline через dotenv.
+terraform_apply:
+  extends: .tf-base
+  stage: apply
+  needs: [terraform_plan]
+  when: manual
+  environment: { name: infrastructure }
+  resource_group: terraform
+  script:
+    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
+    - terraform apply -input=false tfplan
+    - echo "CLUSTER_ID=$(terraform output -raw cluster_id)" > cluster.env
+  artifacts:
+    reports: { dotenv: terraform/cluster.env }
+
+# --- Bootstrap: установка GitLab Agent ---------------------------------------
+# Временный kubeconfig: 0600, содержимое в лог не печатается, удаляется в
+# after_script. Дальше весь доступ к K8s — через GitLab Agent + KUBE_CONTEXT.
+install_gitlab_agent:
+  stage: bootstrap
+  image:
+    name: dtzar/helm-kubectl:3
+    entrypoint: [""]
+  rules: *infra_rules
+  needs: [{ job: terraform_apply, artifacts: true }]
+  environment: { name: dev }
+  resource_group: k8s
+  variables:
+    KUBECONFIG: "$CI_PROJECT_DIR/kubeconfig"
+  before_script:
+    - curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh
+        | bash -s -- -i /opt/yc -n >/dev/null
+    - export PATH="/opt/yc/bin:$PATH"
+  script:
+    - yc config profile create ci || true
+    - yc config profile activate ci
+    - yc config set folder-id           "$YC_FOLDER_ID"
+    - yc config set service-account-key "$YC_SA_KEY"
+    - |
+      umask 077
+      yc managed-kubernetes cluster get-credentials \
+        --id "$CLUSTER_ID" --external --force --kubeconfig "$KUBECONFIG"
+      chmod 600 "$KUBECONFIG"
+    - helm repo add gitlab https://charts.gitlab.io && helm repo update gitlab
+    - |
+      helm upgrade --install otus-agent gitlab/gitlab-agent \
+        -n gitlab-agent --create-namespace --version 2.33.0 \
+        --set image.tag=v19.5.0 \
+        --set config.token="$GITLAB_AGENT_TOKEN" \
+        --set config.kasAddress="$GITLAB_KAS_ADDRESS" \
+        --wait --timeout 5m
+    - kubectl -n gitlab-agent rollout status deployment/otus-agent-gitlab-agent --timeout=2m
+  after_script:
+    - rm -f "$CI_PROJECT_DIR/kubeconfig"
+
+# --- Cluster components ------------------------------------------------------
+install_cluster_components:
+  stage: infrastructure
+  image:
+    name: dtzar/helm-kubectl:3
+    entrypoint: [""]
+  rules: *infra_rules
+  needs: [install_gitlab_agent]
+  environment: { name: dev }
+  resource_group: k8s
+  variables:
+    KUBE_CONTEXT: "$CI_PROJECT_PATH:otus-agent"
+  script:
+    - helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+    - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+    - helm repo add grafana https://grafana.github.io/helm-charts
+    - helm repo update
+    # ingress-nginx дождаться внешнего IP LB (нужен для nip.io-хостов ниже).
+    - |
+      helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
+        -n ingress-nginx --create-namespace --version 4.15.1 \
+        -f helm/monitoring/values-ingress-nginx.yaml --wait --timeout 10m
+      kubectl --context "$KUBE_CONTEXT" -n ingress-nginx \
+        wait --for=jsonpath='{.status.loadBalancer.ingress}' \
+        svc/ingress-nginx-controller --timeout=5m
+      LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
+             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+    # kube-prometheus-stack. Ждём CRD monitor.coreos.com — под ServiceMonitor
+    # приложения.
+    - |
+      helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+        -n monitoring --create-namespace --version 69.8.2 \
+        -f helm/monitoring/values-kube-prometheus-stack.yaml \
+        --set "grafana.ingress.hosts[0]=grafana.$LB.nip.io" \
+        --wait --timeout 10m
+      for crd in servicemonitors podmonitors scrapeconfigs; do
+        kubectl --context "$KUBE_CONTEXT" wait --for=condition=Established \
+          "crd/$crd.monitoring.coreos.com" --timeout=2m
+      done
+    # Loki + Alloy (namespace logging).
+    - |
+      helm upgrade --install loki grafana/loki \
+        -n logging --create-namespace --version 6.55.0 \
+        -f helm/monitoring/values-loki.yaml --wait --timeout 10m
+      helm upgrade --install alloy grafana/alloy \
+        -n logging --create-namespace --version 1.15.0 \
+        --set image.tag=v1.21.3 \
+        -f helm/monitoring/values-alloy.yaml --wait --timeout 5m
+
+# --- Приложение --------------------------------------------------------------
+# Команды сборки/деплоя живут в Makefile (единая точка входа и для CI, и для
+# локального запуска). Alpine-образы ниже не содержат make/curl — ставим их.
+build_application:
+  stage: build
+  image: maven:3.9-eclipse-temurin-21
+  rules: *app_rules
+  cache: { key: maven, paths: [.m2/repository] }
+  script:
+    - make build
+  artifacts:
+    paths:
+      - application/user-service/target/app.jar
+      - application/client-service/target/app.jar
+
+test_application:
+  stage: test
+  image: maven:3.9-eclipse-temurin-21
+  rules: *app_rules
+  needs: [build_application]
+  cache: { key: maven, paths: [.m2/repository], policy: pull }
+  script:
+    - make test
+
+build_images:
+  stage: image
+  image: docker:27
+  services: [docker:27-dind]
+  rules: *app_rules
+  needs: [build_application]
+  timeout: 30m
+  before_script:
+    - apk add --no-cache make
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  script:
+    - make docker-build docker-push
+
+# Деплой через GitLab Agent (KUBE_CONTEXT). Кластер и ingress считаются
+# развёрнутыми (см. правила app-rules и README).
+deploy_application:
+  stage: deploy
+  image:
+    name: dtzar/helm-kubectl:3
+    entrypoint: [""]
+  rules: *app_rules
+  needs: [build_images]
+  environment: { name: dev }
+  before_script:
+    - apk add --no-cache make curl
+  variables:
+    KUBE_CONTEXT: "$CI_PROJECT_PATH:otus-agent"
+  script:
+    - |
+      LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
+             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+      test -n "$LB"
+      export INGRESS_HOST="app.$LB.nip.io"   # тот же nip.io-хост, что и Grafana
+      make app-deploy app-smoke

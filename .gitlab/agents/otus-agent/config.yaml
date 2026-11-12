@@ -1,7 +1,7 @@
-# GitLab Agent for Kubernetes configuration.
-# Consumed by the agent running in-cluster (installed via terraform/kubernetes).
-# Grants CI access ONLY to the current project → KUBE_CONTEXT =
-#   gitlab:devops/devops-otus-app/ms/otus-agent
+# Конфигурация GitLab Agent for Kubernetes.
+# Агент ставится в кластер CI-джобой install-cluster-components (helm gitlab/gitlab-agent)
+# по токену GITLAB_AGENT_TOKEN. Даёт доступ CI ТОЛЬКО к текущему проекту → KUBE_CONTEXT =
+#   <project-path>:<agent-name>  напр. devops/devops-otus-app/ms:otus-agent
 ci_access:
   projects:
     - id: devops/devops-otus-app/ms

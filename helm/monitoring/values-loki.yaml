@@ -1,5 +1,6 @@
-# Grafana Loki in single-binary mode with local filesystem storage (demo).
-# Not scalable — that is fine for the course objective.
+# Grafana Loki в одноподном (SingleBinary / Monolithic) режиме с одной репликой и
+# локальным файловым хранилищем (демо). Релиз — в namespace `logging`, Service
+# `loki` :3100. Немасштабируемо (нет backend/read/write) — для задачи курса ок.
 loki:
   commonConfig:
     replication_factor: 1
@@ -29,13 +30,14 @@ singleBinary:
     enabled: true
     size: 5Gi
 
-# Disable the separately-scaling components we don't need in single-binary mode.
+# Отдельно-масштабируемые компоненты выключены (в одноподном режиме не нужны).
+# В new Loki helm-чарте их replicas тоже должны быть 0 — иначе валидация чарта ругается.
 backend:
-  enabled: false
+  replicas: 0
 read:
-  enabled: false
+  replicas: 0
 write:
-  enabled: false
+  replicas: 0
 
 service:
   type: ClusterIP

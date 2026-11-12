@@ -17,6 +17,19 @@ kubeconfig*
 *.kubeconfig
 account.key
 yc_token*
+yc_sa_key.json
+.cluster/
+.kube/
+deploy.env
+cluster.env
+kube.env
+tfplan
+**/tfplan
+
+# CI local tool caches (make mvn/maven, bootstrap cache, terraform plugin cache)
+.m2/
+.cache/
+.terraform.d/
 
 # Java / Maven
 application/**/target/

@@ -1,11 +1,20 @@
-# Shared defaults. Environment overrides live in values-dev.yaml / values-prod.yaml.
-# Image tag is injected by the pipeline: --set image.tag=$CI_COMMIT_SHA
+# Общие значения чарта. Тег/registry/username/password подставляет
+# пайплайн через --set (см. CI и Makefile).
 image:
-  registry: cr.yandex/REPLACE_REGISTRY_ID
+  registry: registry.example.com/ms     # placeholder; CI: --set image.registry=$CI_REGISTRY_IMAGE
+  tag: latest                           # CI: --set image.tag=$CI_COMMIT_SHA
   pullPolicy: IfNotPresent
 
+# Docker-registry Secret для скачивания приватных образов из GitLab Registry.
+# server/username/password подставляет CI (deploy token read_registry, masked --set).
+# Secret создаётся всегда.
+registry:
+  server: ""
+  username: ""
+  password: ""
+  secretName: gitlab-registry
+
 userService:
-  enabled: true
   name: user-service
   port: 8081
   replicas: 1
@@ -16,7 +25,6 @@ userService:
     limits:   { cpu: 500m, memory: 512Mi }
 
 clientService:
-  enabled: true
   name: client-service
   port: 8082
   replicas: 1
@@ -26,33 +34,8 @@ clientService:
     requests: { cpu: 50m, memory: 192Mi }
     limits:   { cpu: 300m, memory: 384Mi }
 
-# Spring datasource is injected via env SPRING_DATASOURCE_URL/USERNAME/PASSWORD.
-db:
-  host: postgres
-  port: 5432
-  name: users_db
-  user: postgres
-  password: postgres
-  # If set, credentials come from this Secret's data (keys: username, password).
-  existingSecret: ""
-
-# PostgreSQL is deployed by the DEV release only; PROD reuses the same instance
-# (values-prod sets postgres.enabled=false and db.host=postgres.<dev-ns>.svc).
-postgres:
-  enabled: true
-  image: postgres:17-alpine
-  size: 2Gi
-  storageClass: ""            # "" -> cluster default
-  resources:
-    requests: { cpu: 50m, memory: 128Mi }
-
+# Хост приложения подставляет пайплайн (LB ingress-nginx + nip.io).
 ingress:
-  enabled: true
   className: nginx
-  host: PLACEHOLDER_HOST      # filled by pipeline (nip.io)
+  host: PLACEHOLDER_HOST
   path: /
-
-metrics:
-  enabled: true               # create ServiceMonitors (needs kube-prometheus-stack CRDs)
-  labels:
-    release: kube-prometheus  # harmless even when selectors are set to match-all

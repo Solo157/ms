@@ -1,19 +1,17 @@
-# Minimal but functional monitoring for the OTUS demo.
-# Installs Prometheus, Grafana, Alertmanager, node-exporter, kube-state-metrics.
-# Kept small: no HA, no long retention, no autoscaling.
+# Минимальный, но рабочий мониторинг для OTUS-демо.
+# Ставит Prometheus, Grafana, kube-state-metrics, node-exporter, kubelet.
+# Релиз ставится в namespace `monitoring`; без HA/долгого хранения/автоскейлинга.
+# Alertmanager отключен: Prometheus+Grafana достаточно для сбора и визуализации.
 
 alertmanager:
-  enabled: true
-  alertmanagerSpec:
-    resources:
-      requests: { cpu: 10m, memory: 64Mi }
+  enabled: false
 
 grafana:
   enabled: true
-  adminPassword: admin            # demo only; override via CI in "real" use
+  adminPassword: admin            # только для демо; в «реале» переопределять в CI
   resources:
     requests: { cpu: 20m, memory: 128Mi }
-  # Expose Grafana through nginx-ingress (host injected by the pipeline as $GRAFANA_HOST).
+  # Grafana наружу через nginx-ingress (хост подставляет пайплайн как $GRAFANA_HOST).
   ingress:
     enabled: true
     ingressClassName: nginx
@@ -22,23 +20,25 @@ grafana:
     paths:
       - /
     pathType: Prefix
-  # Register Loki as a datasource so logs are queryable in the same Grafana.
+  # Регистрируем Loki (namespace logging) источником данных, чтобы логи были в
+  # той же Grafana. URL согласован с именем релиза/namespace (см. install-cluster-
+  # components): Service `loki` в monitoring->logging = loki.logging.svc.
   additionalDataSources:
     - name: Loki
       type: loki
       access: proxy
-      url: http://loki.monitoring.svc.cluster.local:3100
+      url: http://loki.logging.svc.cluster.local:3100
       isDefault: false
 
 prometheus:
   enabled: true
   prometheusSpec:
-    retention: 2d                 # demo-sized
+    retention: 2d                 # размер под демо
     resources:
       requests: { cpu: 100m, memory: 256Mi }
-    storageSpec: {}               # ephemeral PVC not required for the demo
-    # Discover ServiceMonitors / PodMonitors from ALL namespaces and labels,
-    # so application metrics work without per-release label matching.
+    storageSpec: {}               # ephemeral PVC для демо не нужен
+    # Ищем ServiceMonitors / PodMonitors во всех namespace и со всеми лейблами,
+    # чтобы метрики приложения работали без совпадения лейблов release.
     serviceMonitorSelectorNilUsesHelmValues: false
     podMonitorSelectorNilUsesHelmValues: false
     ruleSelectorNilUsesHelmValues: false
@@ -54,11 +54,9 @@ kube-state-metrics:
   resources:
     requests: { cpu: 10m, memory: 64Mi }
 
-kubelet:
-  enabled: true
-  serviceMonitor: true
+# kubelet-метрики и cAdvisor включены в чарте по умолчанию — здесь не трогаем.
 
-# Turn a couple of baseline alerts on so Alertmanager has something to show.
+# Alertmanager полностью отключён — правил алертов и конфигураций AM не создаём.
 defaultRules:
-  create: true
-additionalAlertmanagerConfigs: []
+  create: false
+

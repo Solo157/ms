@@ -1,0 +1,18 @@
+# Скопируйте в terraform.tfvars и заполните. НЕ коммитьте terraform.tfvars с
+# реальными значениями. В CI несекретные значения передаются через TF_VAR_*,
+# а креды — из masked-переменных (см. README):
+#   TF_VAR_yc_cloud_id  TF_VAR_yc_folder_id
+#   + env YC_SERVICE_ACCOUNT_KEY_FILE (JSON-ключ SA для провайдера) и
+#     -backend-config для S3 (bucket/access_key/secret_key).
+
+name         = "otus-ms"
+yc_cloud_id  = "<YC_CLOUD_ID>"
+yc_folder_id = "<YC_FOLDER_ID>"
+
+# subnet[0] = зона-a (используется master и воркерами); subnet[1] — резервная зона.
+subnet_cidrs = ["10.10.10.0/24", "10.10.11.0/24"]
+zones        = ["ru-central1-a", "ru-central1-b"]
+
+node_count   = 3
+node_cores   = 4
+node_memory  = 8
