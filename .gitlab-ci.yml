@@ -1,14 +1,9 @@
 # Единый pipeline: сначала инфраструктура (Terraform + кластерные компоненты),
-# затем приложение (build -> test -> image -> deploy).
-#
-# Разделение запуска — только rules:changes:
-#   - правка Java/чарта приложения НЕ запускает Terraform;
-#   - правка Terraform/мониторинга НЕ пересобирает приложение.
-# terraform_apply — manual, запускается только вручную.
-#
-# В обычном прикладном пайплайне кластер считается развёрнутым: job'ы деплоя
-# берут IP ingress-nginx из уже работающего кластера. При ПЕРВОМ развёртывании
-# сначала прогоняется инфраструктурный пайплайн, затем отдельный push приложения.
+# затем приложение (build -> test -> image -> deploy). Порядок задаётся стадиями,
+# jobs видны в каждом пайплайне (без фильтра rules:changes — иначе на коммите,
+# не затронувшем нужные пути, GitLab не создаёт пустой pipeline и jobs «пропадают»).
+# terraform_apply и deploy_application — manual; terraform_destroy — отдельный
+# ручной teardown. Кластер и ingress считаются подготовленными после apply+bootstrap.
 
 workflow:
   rules:
@@ -34,47 +29,19 @@ stages:
   - test
   - image
   - deploy
+  - destroy
 
 # --- Правила запуска ---------------------------------------------------------
-# Инфраструктурные jobs — только при изменении инфраструктуры.
+# Jobs не фильтруются по изменённым файлам: весь pipeline виден на любом коммите
+# (инфраструктура идёт раньше приложения за счёт порядка стадий). when: always
+# означает «создавать job всегда». Деструктивные/требующие кластера jobs остаются
+# manual на уровне конкретных jobs (terraform_apply, deploy_application,
+# terraform_destroy).
 .infra-rules: &infra_rules
-  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes:
-      - "terraform/**/*"
-      - "helm/monitoring/**/*"
-      - ".gitlab/agents/otus-agent/config.yaml"
-  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes:
-      - "terraform/**/*"
-      - "helm/monitoring/**/*"
-      - ".gitlab/agents/otus-agent/config.yaml"
+  - when: always
 
-# Прикладные jobs — только при изменении приложения и только если в том же
-# коммите не менялась инфраструктура. Иначе приложение может задеплоиться в ещё
-# не подготовленный кластер.
 .app-rules: &app_rules
-  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes:
-      - "terraform/**/*"
-      - "helm/monitoring/**/*"
-      - ".gitlab/agents/otus-agent/config.yaml"
-    when: never
-  - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    changes:
-      - "application/**/*"
-      - "helm/application/**/*"
-      - "Makefile"
-  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes:
-      - "terraform/**/*"
-      - "helm/monitoring/**/*"
-      - ".gitlab/agents/otus-agent/config.yaml"
-    when: never
-  - if: '$CI_COMMIT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
-    changes:
-      - "application/**/*"
-      - "helm/application/**/*"
-      - "Makefile"
+  - when: always
 
 # --- Terraform ---------------------------------------------------------------
 .tf-base:
@@ -94,10 +61,15 @@ stages:
     # они не попадают).
     - export AWS_ACCESS_KEY_ID="$YC_ACCESS_KEY_ID"
     - export AWS_SECRET_ACCESS_KEY="$YC_SECRET_ACCESS_KEY"
+    - export TF_CLI_CONFIG_FILE="$CI_PROJECT_DIR/terraform/terraform.rc"
 
 terraform_validate:
   extends: .tf-base
   stage: validate
+  # Первый инфраструктурный job — запускается вручную. Дальше инфраструктурная
+  # цепочка идёт автоматически, каждый job ждёт предыдущий через needs.
+  rules:
+    - when: manual
   script:
     - cd terraform
     - terraform fmt -check
@@ -107,6 +79,7 @@ terraform_validate:
 terraform_plan:
   extends: .tf-base
   stage: plan
+  needs: [terraform_validate]
   script:
     - cd terraform
     - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
@@ -115,12 +88,12 @@ terraform_plan:
     paths:
       - terraform/tfplan
 
-# terraform_apply — manual. CLUSTER_ID идёт в job установки агента через dotenv.
+# terraform_apply — авто, ждёт terraform_plan (tfplan-артефакт). CLUSTER_ID идёт в
+# job установки агента через dotenv.
 terraform_apply:
   extends: .tf-base
   stage: apply
   needs: [terraform_plan]
-  when: manual
   environment: { name: infrastructure }
   resource_group: terraform
   script:
@@ -132,6 +105,24 @@ terraform_apply:
     reports:
       dotenv: terraform/cluster.env
 
+# terraform_destroy — manual. Полностью удаляет облачные ресурсы (кластер,
+# сеть, SA, IAM). Запускается только вручную (rules, а не job-level when, т.к.
+# правила из .tf-base имели бы приоритет).
+terraform_destroy:
+  extends: .tf-base
+  stage: destroy
+  # needs: [] отвязывает от порядка стадий — job запускается вручную сразу,
+  # не дожидаясь предыдущих стадий; независим от цепочки (state из remote backend).
+  needs: []
+  rules:
+    - when: manual
+  resource_group: terraform
+  environment: { name: infrastructure }
+  script:
+    - cd terraform
+    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
+    - terraform destroy -auto-approve
+
 # --- Bootstrap: установка GitLab Agent ---------------------------------------
 # Временный kubeconfig (0600, из лога скрыт, удаляется в after_script). Дальше
 # доступ к K8s — только через GitLab Agent и KUBE_CONTEXT.
@@ -141,7 +132,9 @@ install_gitlab_agent:
     name: dtzar/helm-kubectl:3
     entrypoint: [""]
   rules: *infra_rules
-  needs: [{ job: terraform_apply, artifacts: true }]
+  needs:
+    - job: terraform_apply
+      artifacts: true
   environment: { name: dev }
   resource_group: k8s
   variables:
@@ -224,7 +217,13 @@ install_cluster_components:
 build_application:
   stage: build
   image: maven:3.9-eclipse-temurin-21
-  rules: *app_rules
+  # Первый прикладной job — запускается вручную; дальше app-цепочка идёт
+  # автоматически, каждый job ждёт предыдущий через needs.
+  # Кросс-гейт: приложение не стартует, пока вся цепочка инфраструктуры
+  # не завершилась успешно (needs по умолчанию = только после успеха).
+  needs: [install_cluster_components]
+  rules:
+    - when: manual
   cache: { key: maven, paths: [.m2/repository] }
   script:
     - make build
@@ -257,15 +256,16 @@ build_images:
   script:
     - make docker-build docker-push
 
-# Деплой через GitLab Agent. Считается, что кластер, ingress и его внешний IP
-# уже подготовлены (см. правила app_rules).
+# Установка приложения: helm-релиз в namespace dev через GitLab Agent.
+# Авто: ждёт build_images (needs) и идёт последним в прикладной цепочке. Кластер,
+# ingress и его внешний IP считаются подготовленными инфраструктурной цепочкой.
 deploy_application:
   stage: deploy
   image:
     name: dtzar/helm-kubectl:3
     entrypoint: [""]
-  rules: *app_rules
   needs: [build_images]
+  rules: *app_rules
   environment: { name: dev }
   before_script:
     - apk add --no-cache make curl

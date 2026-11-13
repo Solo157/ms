@@ -48,13 +48,13 @@ resource "yandex_iam_service_account" "node" {
 
 resource "yandex_resourcemanager_folder_iam_member" "master_cluster" {
   folder_id = var.yc_folder_id
-  role      = "k8s.cluster-api.cluster"
+  role      = "k8s.clusters.agent"
   member    = "serviceAccount:${yandex_iam_service_account.master.id}"
 }
 
 resource "yandex_resourcemanager_folder_iam_member" "master_vpc" {
   folder_id = var.yc_folder_id
-  role      = "vpc.privateAdmin"
+  role      = "vpc.publicAdmin"
   member    = "serviceAccount:${yandex_iam_service_account.master.id}"
 }
 
@@ -62,12 +62,6 @@ resource "yandex_resourcemanager_folder_iam_member" "master_logging" {
   folder_id = var.yc_folder_id
   role      = "logging.writer"
   member    = "serviceAccount:${yandex_iam_service_account.master.id}"
-}
-
-resource "yandex_resourcemanager_folder_iam_member" "node_vpc" {
-  folder_id = var.yc_folder_id
-  role      = "vpc.privateUser"
-  member    = "serviceAccount:${yandex_iam_service_account.node.id}"
 }
 
 resource "yandex_kubernetes_cluster" "main" {
@@ -92,7 +86,11 @@ resource "yandex_kubernetes_cluster" "main" {
   }
 
   # Сначала удаляется кластер, и только потом снимаются IAM-роли master SA.
-  depends_on = [yandex_resourcemanager_folder_iam_member.master_vpc]
+  depends_on = [
+    yandex_resourcemanager_folder_iam_member.master_cluster,
+    yandex_resourcemanager_folder_iam_member.master_vpc,
+    yandex_resourcemanager_folder_iam_member.master_logging
+  ]
 }
 
 resource "yandex_kubernetes_node_group" "main" {

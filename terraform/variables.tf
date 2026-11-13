@@ -20,29 +20,29 @@ variable "yc_folder_id" {
 variable "zone" {
   description = "Зона доступности (одна для подсети, master и нод)"
   type        = string
-  default     = "ru-central1-a"
+  default     = "ru-central1-d"
 }
 
 variable "subnet_cidr" {
   description = "CIDR единственной подсети"
   type        = string
-  default     = "10.10.10.0/24"
+  default     = "10.97.0.0/16"
 }
 
 variable "node_count" {
   description = "Число воркеров"
   type        = number
-  default     = 3
+  default     = 1
 }
 
 variable "node_cores" {
   description = "vCPU на воркер"
   type        = number
-  default     = 4
+  default     = 2
 }
 
 variable "node_memory" {
   description = "Память на воркер, ГБ"
   type        = number
-  default     = 8
+  default     = 4
 }

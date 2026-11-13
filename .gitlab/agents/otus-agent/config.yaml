@@ -4,4 +4,4 @@
 #   <project-path>:<agent-name>  напр. devops/devops-otus-app/ms:otus-agent
 ci_access:
   projects:
-    - id: devops/devops-otus-app/ms
+    - id: devops/devops-otus-app/ms:otus-agent

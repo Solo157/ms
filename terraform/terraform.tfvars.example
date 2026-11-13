@@ -14,6 +14,6 @@ yc_folder_id = "<YC_FOLDER_ID>"
 zone        = "ru-central1-a"
 subnet_cidr = "10.10.10.0/24"
 
-node_count  = 3
-node_cores  = 4
-node_memory = 8
+node_count  = 2
+node_cores  = 2
+node_memory = 4
