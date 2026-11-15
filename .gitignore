@@ -1,17 +1,3 @@
-# Terraform
-**/.terraform/*
-*.tfstate
-*.tfstate.*
-crash.log
-crash.*.log
-terraform.tfvars
-terraform.tfvars.json
-*.tfvars.json
-override.tf
-override.tf.json
-*_override.tf
-*_override.tf.json
-
 # YC / kubeconfig / creds never in git
 kubeconfig*
 *.kubeconfig
@@ -23,13 +9,10 @@ yc_sa_key.json
 deploy.env
 cluster.env
 kube.env
-tfplan
-**/tfplan
 
-# CI local tool caches (make mvn/maven, bootstrap cache, terraform plugin cache)
+# CI local tool caches (make mvn/maven cache)
 .m2/
 .cache/
-.terraform.d/
 
 # Java / Maven
 application/**/target/

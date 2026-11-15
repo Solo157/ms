@@ -1,165 +1,113 @@
-# OTUS CI/CD — микросервисное приложение в Yandex Cloud
+# OTUS CI/CD — приложение + выкатка через GitLab
 
-Учебный демо-проект в **одном GitLab-проекте**: приложение + Terraform + Helm +
-Makefile + один GitLab CI pipeline. Всё разворачивается в один Managed Kubernetes
-кластер Yandex Cloud.
+Учебный демо-проект в **одном GitLab-проекте**: микросервисное приложение + один
+GitLab CI pipeline, который **только собирает и выкатывает приложение** на
+подготовленный Kubernetes-стенд.
+
+> **Развёртывание инфраструктуры (кластер, ingress-контроллер, мониторинг) в этот
+> проект НЕ входит.** Кластер и ingress подготавливаются снаружи (оператор /
+> отдельный проект). Здесь остаётся только приложение и pipeline его деплоя.
 
 Приложение — два Spring Boot сервиса:
 
 - `application/user-service` — REST на `:8081`, данные H2 in-memory (без БД);
 - `application/client-service` — REST-прокси на `:8082`, ходит в user-service.
 
-## Архитектура
-
-- **Terraform** (`terraform/`) создаёт только облако: одну VPC, одну подсеть в
-  одной зоне, Security Group, один Managed Kubernetes (zonal) с одной Node Group,
-  два сервисных аккаунта (master и node) и их IAM-роли. Terraform-провайдеры
-  Kubernetes/Helm не используются. Один корень, один remote state в Yandex Object
-  Storage (S3-backend).
-- **CI разворачивает всё в кластер.** Сначала bootstrap-джоба ставит GitLab Agent
-  for Kubernetes (`install_gitlab_agent`). Дальше доступ к Kubernetes идёт только
-  через `KUBE_CONTEXT` (`<project-path>:otus-agent`) — временного kubeconfig в
-  дальнейших джобах нет.
-- **Один GitLab Runner** (внешний, тег `yc-runner`) создаётся и настраивается
-  вручную оператором до первого запуска.
-- **Образы** — в GitLab Container Registry (`CI_REGISTRY` / `CI_REGISTRY_IMAGE`).
-  Kubernetes скачивает их через dockerconfigjson-Secret из Deploy Token.
-- Не используются: PostgreSQL (данные в H2 in-memory), Yandex Container Registry,
-  prod-окружение/namespace, Terraform modules, GitLab Runner из Terraform.
-
-### Кто что делает
-
-| Что | Чем |
-|---|---|
-| VPC, подсеть, SG, MGKS + Node Group, SA + IAM | Terraform (`terraform/`) |
-| GitLab Runner | оператор, вручную (регистрация в проект, тег `yc-runner`) |
-| GitLab Agent | CI `install_gitlab_agent` (YC CLI + Helm в ns `gitlab-agent`) |
-| ingress-nginx, kube-prometheus-stack, Loki, Alloy | CI `install_cluster_components` (Helm через агент) |
-| build/test, docker build/push, деплой приложения | CI-джобы + `Makefile` |
-| bucket Object Storage + ключи, SA YC + ключ, Deploy Token, агент-токен | оператор, разово (см. «Первоначальная настройка») |
-
-### Namespace'ы
-
-| Namespace | Содержимое |
-|---|---|
-| `gitlab-agent` | GitLab Agent |
-| `ingress-nginx` | ingress-nginx (LoadBalancer) |
-| `monitoring` | Prometheus, Grafana (Alertmanager выключен) |
-| `logging` | Loki, Alloy |
-| `dev` | приложение (`user-service`, `client-service`) |
-
 ## Структура
 
 ```
 application/                 исходники + Dockerfile обоих сервисов (Maven reactor)
   user-service/  client-service/
-terraform/                   один корень, один state, без модулей:
-  main.tf           сеть, SG, кластер, node group, SA + IAM
-  variables.tf  outputs.tf  providers.tf  versions.tf  backend.tf
-  terraform.tfvars.example   образец terraform.tfvars (реальный tfvars не коммитим)
 helm/application/            чарт приложения (name: ms-application):
   Chart.yaml  values.yaml
   templates/  user-service.yaml  client-service.yaml  ingress.yaml
               image-pull-secret.yaml
-helm/monitoring/             только values для внешних чартов (своих чартов нет):
-  values-ingress-nginx.yaml  values-kube-prometheus-stack.yaml
-  values-loki.yaml  values-alloy.yaml
-.gitlab/agents/otus-agent/config.yaml   ci_access на проект
 Makefile                     build / test / docker-build / docker-push /
                              app-deploy / app-smoke / helm-lint / helm-template
-.gitlab-ci.yml               один pipeline, 9 стадий, rules:changes
+.gitlab-ci.yml               pipeline приложения: build -> image -> deploy
 ```
+
+## GitLab CI/CD pipeline
+
+Стадии: **build -> image -> deploy**.
+
+1. `build_application` (стадия `build`, **manual**): `make build`, артефакты — jar'ы
+   обоих сервисов.
+2. `build_images` (стадия `image`): `make docker-build docker-push` — образы в GitLab
+   Container Registry (`CI_REGISTRY` / `CI_REGISTRY_IMAGE`).
+3. `deploy_application` (стадия `deploy`): получает временный kubeconfig до
+   существующего кластера, `make app-deploy app-smoke` — helm-релиз приложения в
+   namespace `dev` по хосту `INGRESS_HOST`, затем проверочные запросы.
 
 ## GitLab CI/CD Variables
 
 Auto (предопределённые GitLab — руками не задавать): `CI_PROJECT_PATH`,
 `CI_PIPELINE_SOURCE`, `CI_COMMIT_BRANCH`, `CI_OPEN_MERGE_REQUESTS`, `CI_REGISTRY`,
 `CI_REGISTRY_IMAGE`, `CI_REGISTRY_USER`, `CI_REGISTRY_PASSWORD`, `CI_DEPLOY_USER`,
-`CI_DEPLOY_PASSWORD`. `CI_DEPLOY_USER`/`CI_DEPLOY_PASSWORD` выдаёт сам GitLab из
-Deploy Token `gitlab-deploy-token` на protected-ветке (сами переменные с префиксом
-`CI_` не создаются). `KUBE_CONTEXT` = `$CI_PROJECT_PATH:otus-agent` собирается в
-джобах.
+`CI_DEPLOY_PASSWORD` (последние два выдаёт Deploy Token `gitlab-deploy-token` на
+protected-ветке).
 
-Non-secret (задаёт оператор; значения берутся из GitLab/YC):
+Non-secret (задаёт оператор):
 
 | Переменная | Значение |
 |---|---|
-| `YC_CLOUD_ID` | ID облака YC (из Yandex Cloud) |
-| `YC_FOLDER_ID` | ID каталога YC (из Yandex Cloud) |
-| `TF_STATE_BUCKET` | имя bucket Object Storage под state |
-| `GITLAB_KAS_ADDRESS` | адрес KAS из UI GitLab (`wss://…/-/kubernetes-agent/`) |
+| `YC_FOLDER_ID` | ID каталога YC (для `yc get-credentials` до готового кластера) |
+| `INGRESS_HOST` | **внешний ingress-хост приложения** (см. «Как получить INGRESS_HOST в YC») |
 
 Secret (masked):
 
 | Переменная | Назначение |
 |---|---|
-| `YC_SA_KEY` | JSON-ключ сервисного аккаунта YC, **типа File**: GitLab отдаёт путь к файлу; его читают Terraform (`YC_SERVICE_ACCOUNT_KEY_FILE`) и `yc config set service-account-key` |
-| `YC_ACCESS_KEY_ID` / `YC_SECRET_ACCESS_KEY` | статические ключи Object Storage; передаются в S3-backend только как env `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, чтобы не попасть в state |
-| `GITLAB_AGENT_TOKEN` | токен агента (`glagent-…`) из UI GitLab. Не путать с токеном раннера (`glrt-…`) |
+| `YC_SA_KEY` | JSON-ключ сервисного аккаунта YC, **типа File**: путь к нему для `yc config set service-account-key` |
 
-## Первоначальная настройка (разово, руками)
+Параметр `CLUSTER_NAME` (имя готового кластера) задан дефолтом в `.gitlab-ci.yml`
+(`otus-ms-cluster`); переопределяется переменной CI/CD при другом имени.
 
-1. Сервисный аккаунт YC с ролью `editor` на каталог + JSON-ключ → `YC_SA_KEY`
-   (тип File).
-2. Object Storage: bucket под state + статические ключи (пользователь с
-   `storage.editor`) → `YC_ACCESS_KEY_ID`/`YC_SECRET_ACCESS_KEY`, non-secret
-   `TF_STATE_BUCKET`.
-3. Зарегистрировать существующий внешний GitLab Runner с тегом `yc-runner`
-   (Docker executor) в проекте. Runner в Terraform не создаётся.
-4. Создать Deploy Token с именем `gitlab-deploy-token` и scope `read_registry`.
-   Отдельные переменные не нужны — GitLab сам отдаст `CI_DEPLOY_USER`/
-   `CI_DEPLOY_PASSWORD` на protected-ветке.
-5. Создать GitLab Agent `otus-agent` в UI + токен агента → `GITLAB_AGENT_TOKEN`.
-   В `.gitlab/agents/otus-agent/config.yaml` уже прописан `ci_access` на проект.
-6. Задать non-secret: `YC_CLOUD_ID`, `YC_FOLDER_ID`, `TF_STATE_BUCKET`,
-   `GITLAB_KAS_ADDRESS`. Ветка деплоя (обычно `main`) — protected.
+## Как получить INGRESS_HOST в YC
 
-Порядок файлов Terraform и переменные: значения по умолчанию заданы в
-`variables.tf`; в CI required-значения (`yc_cloud_id`, `yc_folder_id`) и bucket
-backend'а подаются отдельными переменными, секреты — через env (см. `.gitlab-ci.yml`
-джобу `.tf-base`). Локально — скопировать `terraform.tfvars.example` в
-`terraform.tfvars` (не коммитить).
+`INGRESS_HOST` — это DNS-имя, по которому приложение доступно снаружи стенда. ingress
+`type: LoadBalancer` получает внешний IP от Yandex Cloud; хост собирается как
+`app.<IP>.nip.io` (wildcard-DNS `*.nip.io` указывает на любой IPv4, отдельная зона не
+нужна). Значит достаточно узнать внешний IP балансировщика ingress.
 
-## Порядок запуска инфраструктурного пайплайна
+Способ 1 — через `kubectl` (самый простой, если есть kubeconfig до кластера):
 
-Триггер — коммит, затрагивающий `terraform/**`, `helm/monitoring/**` или конфиг
-агента.
+```bash
+LB=$(kubectl -n ingress-nginx get svc ingress-nginx-controller \
+       -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+echo "app.$LB.nip.io"
+```
 
-1. `terraform_validate` (стадия `validate`): `cd terraform && terraform fmt -check
-   && terraform init -backend=false && terraform validate`.
-2. `terraform_plan` (стадия `plan`): `terraform init -reconfigure
-   -backend-config=bucket=$TF_STATE_BUCKET` и `terraform plan -out=tfplan`
-   (артефакт `terraform/tfplan`).
-3. `terraform_apply` (стадия `apply`, **manual** — сам не запускается): применяет
-   `tfplan` и пишет `CLUSTER_ID` в `cluster.env` (dotenv-артефакт).
-4. `install_gitlab_agent` (стадия `bootstrap`, после apply, берёт `CLUSTER_ID`):
-   YC CLI получает временный kubeconfig (файл `0600`, живёт только во время джобы) и
-   ставит GitLab Agent в namespace `gitlab-agent`. kubeconfig удаляется в
-   `after_script`.
-5. `install_cluster_components` (стадия `infrastructure`, после агента): разворачивает
-   ingress-nginx (ждёт внешний IP балансировщика), kube-prometheus-stack (Grafana на
-   `grafana.<LB>.nip.io`), Loki и Alloy. Все установки через `helm upgrade
-   --install` — повторный запуск безопасен.
+Способ 2 — через Yandex Cloud CLI (для MGKS Service `type: LoadBalancer` создаёт
+сетевой балансировщик в каталоге; внешний адрес — в его `listeningAddresses`):
 
-Дальнейший доступ к кластеру — через `KUBE_CONTEXT` (GitLab Agent), временный
-kubeconfig больше не используется.
+```bash
+# найти балансировщик, созданный для ingress-контроллера, и взять внешний IP
+yc lb load-balancer list --folder-id "$YC_FOLDER_ID" --format json \
+  | jq -r '.[] | select(.name|test("ingress";"i"))
+           | .networkLoadBalancer.listeningAddresses[]?.external.address'
+```
 
-## Порядок запуска прикладного пайплайна
+Затем: `INGRESS_HOST = app.<тот-же-IP>.nip.io`.
 
-Триггер — коммит, затрагивающий `application/**`, `helm/application/**` или
-`Makefile` (и только если в том же коммите не менялась инфраструктура).
+Способ 3 — консоль YC: **Managed Service for Load Balancer** (или **Compute →
+Load balancers**) в нужном каталоге → балансировщик, созданный для кластера
+(обычно в имени содержит id кластера / namespace) → вкладка/listening address →
+внешний IPv4-адрес.
 
-6. `build_application` (стадия `build`): `make build`, артефакты jar.
-7. `test_application` (стадия `test`): `make test`.
-8. `build_images` (стадия `image`): ждёт **и** `build_application`, **и**
-   `test_application`; `make docker-build docker-push` (образы в GitLab Registry).
-9. `deploy_application` (стадия `deploy`): читает внешний IP ingress-nginx, ставит
-   `INGRESS_HOST=app.<LB>.nip.io` и вызывает `make app-deploy app-smoke` —
-   helm-релиз в namespace `dev` через агент, затем проверочные запросы.
+Полученное `app.<IP>.nip.io` записать в CI/CD-переменную `INGRESS_HOST`.
+(Если ingress-сервис ещё не `LoadBalancer` или IP не проставился — он будет пустым;
+сначала убедитесь, что внешний адрес выдан.)
 
-При первом развёртывании сначала полностью прогоняется инфраструктурный пайплайн
-(шаги 1–5), только потом — прикладной push (шаги 6–9). Изменения приложения
-Terraform не запускают.
+> Локально / без nip.io можно задать `INGRESS_HOST` равным просто `<IP>` (запросы по
+> IP без virtual-host тоже пройдут через ingress), но для корректной маршрутизации по
+> host лучше использовать `<host>.nip.io`.
+
+## Проверка после развёртывания
+
+Приложение: `http://$INGRESS_HOST/health` и `http://$INGRESS_HOST/users`.
+
+`make app-smoke` делает ровно эти две проверки через curl.
 
 ## Основные команды Makefile
 
@@ -178,36 +126,17 @@ make helm-template  # helm template helm/application (проверка ренд�
 ```
 
 Переопределяемые переменные: `IMAGE`, `TAG`, `KUBE_CONTEXT`, `NAMESPACE`,
-`RELEASE`, `INGRESS_HOST`.
+`RELEASE`, `INGRESS_HOST`. Доступ к кластеру — через `KUBECONFIG`/current-context
+(`KUBE_CONTEXT` пусто => helm берёт текущий контекст).
 
-## Проверка после развёртывания
+## Мониторинг (ServiceMonitor)
 
-- Grafana: `http://grafana.<LB>.nip.io` (`admin`/`admin`). Готовые панели
-  kube-prometheus-stack; источник данных Loki добавлен значениями чарта.
-- Prometheus: `kubectl -n monitoring get servicemonitors` — видны `user-service` и
-  `client-service`; в Targets они `UP` (метрики собираются через ServiceMonitor,
-  отдельных аннотаций `prometheus.io/*` не требуется).
-- Loki: в Explore Grafana (источник `Loki`) видны логи подов с метками `namespace`,
-  `pod`, `container`.
-- Приложение: `http://app.<LB>.nip.io/health` и `/users`.
-
-IP балансировщика: `kubectl -n ingress-nginx get svc ingress-nginx-controller`.
+В шаблонах сервисов есть `ServiceMonitor` — он разворачивается **всегда** и требует
+наличия Prometheus Operator (CRD `monitoring.coreos.com`) в кластере; сам
+Prometheus/стек мониторинга готовится снаружи, как и кластер.
 
 ## Известные ограничения демо
 
-- Одна зона (по умолчанию `ru-central1-a`), фиксированный размер Node Group.
 - H2 in-memory: данные user-service живут только внутри пода.
-- Grafana admin-пароль в значениях чарта (только демо).
-- Loki — SingleBinary, `filesystem`, retention 48h, без HA; сбор логов одним
-  Alloy Deployment (не DaemonSet).
-- Alertmanager намеренно выключен.
-- GitLab Agent получает широкие RBAC-права в кластере — для продакшена их сузить.
-
-## Локальные проверки и реальный YC
-
-Локально проходят: `terraform fmt`/`validate`, `helm lint`/`template` приложения,
-проверка синтаксиса `.gitlab-ci.yml`, `make -n`. Полный `terraform apply`,
-развёртывание агента, получение внешнего IP, реальная работа
-Prometheus/Grafana/Loki и самого приложения проверяются только запуском в Yandex
-Cloud. Для `yc get-credentials` адрес GitLab Runner должен быть в allowlist
-master-узла кластера.
+- Стенд (кластер, ingress,Issuer/сертификаты при необходимости) готовится снаружи —
+  pipeline их не создаёт.

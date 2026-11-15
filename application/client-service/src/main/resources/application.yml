@@ -22,3 +22,18 @@ management:
       enabled: true
     readinessstate:
       enabled: true
+  metrics:
+    # Общий тег application позволяет Grafana/Prometheus различать сервисы.
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # Гистограмма задержек HTTP — для p50/p95/p99 latency-панелей в Grafana.
+        http.server.requests: true
+
+# Логи структурированным JSON (ECS) в stdout — Loki/Alloy собирают stdout пода,
+# Grafana извлекает service.name (= spring.application.name) как метку потока.
+logging:
+  structured:
+    format:
+      console: ecs

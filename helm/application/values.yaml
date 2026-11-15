@@ -14,7 +14,7 @@ registry:
   password: ""
   secretName: gitlab-registry
 
-# Хост приложения: LB ingress-nginx + nip.io, подставляет CI.
+# Хост приложения: внешний ingress-хост стенда, подставляет CI (--set ingress.host=$INGRESS_HOST).
 ingress:
   host: PLACEHOLDER_HOST
 

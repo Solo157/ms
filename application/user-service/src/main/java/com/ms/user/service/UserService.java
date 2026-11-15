@@ -4,6 +4,10 @@ import com.ms.user.dto.UserDTO;
 import com.ms.user.entity.User;
 import com.ms.user.exception.UserNotFoundException;
 import com.ms.user.repository.UserRepository;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -13,10 +17,17 @@ import java.util.List;
 @Transactional(readOnly = true)
 public class UserService {
 
-    private final UserRepository userRepository;
+    private static final Logger log = LoggerFactory.getLogger(UserService.class);
 
-    public UserService(UserRepository userRepository) {
+    private final UserRepository userRepository;
+    private final Counter usersCreated;
+
+    public UserService(UserRepository userRepository, MeterRegistry meterRegistry) {
         this.userRepository = userRepository;
+        // Бизнес-метрика: сколько пользователей создано (счётчик users.created.total).
+        this.usersCreated = Counter.builder("users.created")
+                .description("Total number of users created")
+                .register(meterRegistry);
     }
 
     public List<UserDTO> getAllUsers() {
@@ -35,6 +46,8 @@ public class UserService {
     public UserDTO createUser(UserDTO userDTO) {
         User user = toEntity(userDTO);
         user = userRepository.save(user);
+        usersCreated.increment();
+        log.info("User created id={} name={}", user.getId(), user.getName());
         return toDTO(user);
     }
 
@@ -45,6 +58,7 @@ public class UserService {
         user.setName(userDTO.getName());
         user.setEmail(userDTO.getEmail());
         user = userRepository.save(user);
+        log.info("User updated id={}", id);
         return toDTO(user);
     }
 
@@ -53,6 +67,7 @@ public class UserService {
         User user = userRepository.findById(id)
                 .orElseThrow(() -> new UserNotFoundException("User not found with id: " + id));
         userRepository.delete(user);
+        log.info("User deleted id={}", id);
     }
 
     private UserDTO toDTO(User user) {

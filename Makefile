@@ -1,4 +1,7 @@
-# Команды сборки/теста/деплоя приложения. Их же вызывает CI (.gitlab-ci.yml).
+# Команды сборки/теста/деплоя ПРИЛОЖЕНИЯ. Их же вызывает CI (.gitlab-ci.yml).
+# Развёртывание инфраструктуры (кластер/ingress/мониторинг) здесь НЕ делается —
+# стенд готовится снаружи, доступ к кластеру идёт через kubeconfig ($KUBECONFIG
+# или current-context), хост задаётся INGRESS_HOST.
 # Значения берутся из переменных GitLab; локально переопределяем через окружение:
 #   TAG=dev IMAGE=localhost:5000/ms INGRESS_HOST=localhost make app-deploy
 #
@@ -6,7 +9,7 @@
 #   make test           - unit-тесты
 #   make docker-build   - собрать два образа локально
 #   make docker-push    - login в GitLab Registry + push
-#   make app-deploy     - helm upgrade -i в namespace dev через GitLab Agent
+#   make app-deploy     - helm upgrade -i в namespace dev (kubeconfig из $KUBECONFIG)
 #   make app-smoke      - curl /health и /users через ingress
 #   make helm-lint helm-template - локальная проверка чарта
 
@@ -15,11 +18,16 @@ SHELL := /bin/sh
 IMAGE ?= $(CI_REGISTRY_IMAGE)
 TAG   ?= $(CI_COMMIT_SHA)
 
-KUBE_CONTEXT ?= $(CI_PROJECT_PATH):otus-agent
-NAMESPACE    ?= dev
-RELEASE      ?= ms-dev
+NAMESPACE ?= dev
+RELEASE   ?= ms-dev
 
-# Хост приложения (LB ingress-nginx + nip.io) подставляет CI.
+# Контекст kubeconfig для helm. Пусто => helm берёт current-context из $KUBECONFIG
+# (так работает CI: kubeconfig от yc get-credentials). Для другого контекста
+# задать KUBE_CONTEXT явно.
+KUBE_CONTEXT ?=
+
+# Внешний ingress-хост приложения стенда. В CI — переменная INGRESS_HOST из
+# настроек GitLab; локально задать явно.
 INGRESS_HOST ?=
 
 MAVEN := mvn --batch-mode --errors -ntp
@@ -42,8 +50,11 @@ docker-push:
 	docker push "$(IMAGE)/ms-client-service:$(TAG)"
 
 app-deploy:
-	helm upgrade --install $(RELEASE) helm/application -n $(NAMESPACE) \
-	  --kube-context $(KUBE_CONTEXT) \
+	# --kube-context передаётся ТОЛЬКО если KUBE_CONTEXT непустой. CI-джобы,
+	# где доступ идёт через временный KUBECONFIG от YC, выставляют KUBE_CONTEXT=""
+	# -> флаг опускается, helm берёт current-context из kubeconfig.
+	helm upgrade --install $(RELEASE) helm/application -n $(NAMESPACE) --create-namespace \
+	  $(if $(KUBE_CONTEXT),--kube-context '$(KUBE_CONTEXT)',) \
 	  --set image.registry=$(IMAGE) --set image.tag=$(TAG) \
 	  --set registry.server=$(CI_REGISTRY) \
 	  --set registry.username=$(CI_DEPLOY_USER) \

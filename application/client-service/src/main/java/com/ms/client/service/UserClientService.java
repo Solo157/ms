@@ -1,6 +1,10 @@
 package com.ms.client.service;
 
 import com.ms.client.dto.UserDTO;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.ResponseEntity;
 import org.springframework.stereotype.Service;
@@ -11,13 +15,22 @@ import java.util.List;
 @Service
 public class UserClientService {
 
-    private final RestClient restClient;
+    private static final Logger log = LoggerFactory.getLogger(UserClientService.class);
 
-    public UserClientService(RestClient restClient) {
+    private final RestClient restClient;
+    private final Counter proxyRequests;
+
+    public UserClientService(RestClient restClient, MeterRegistry meterRegistry) {
         this.restClient = restClient;
+        // Бизнес-метрика: число проксированных запросов в user-service.
+        this.proxyRequests = Counter.builder("proxy.user.requests")
+                .description("Total proxied requests to user-service")
+                .register(meterRegistry);
     }
 
     public List<UserDTO> getAllUsers() {
+        proxyRequests.increment();
+        log.info("Proxy GET /users");
         return restClient.get()
                 .uri("/users")
                 .retrieve()

@@ -1,9 +1,7 @@
-# Единый pipeline: сначала инфраструктура (Terraform + кластерные компоненты),
-# затем приложение (build -> test -> image -> deploy). Порядок задаётся стадиями,
-# jobs видны в каждом пайплайне (без фильтра rules:changes — иначе на коммите,
-# не затронувшем нужные пути, GitLab не создаёт пустой pipeline и jobs «пропадают»).
-# terraform_apply и deploy_application — manual; terraform_destroy — отдельный
-# ручной teardown. Кластер и ingress считаются подготовленными после apply+bootstrap.
+# Pipeline ТОЛЬКО приложения: build -> (docker) image -> deploy.
+# Развёртывание инфраструктуры (кластер, ingress, мониторинг) в этот проект НЕ входит —
+# стенд и ingress подготавливаются снаружи. Cluster-хост приложения подаётся переменной
+# INGRESS_HOST, доступ к кластеру — временным kubeconfig-ом от YC-SA (кластер уже создан).
 
 workflow:
   rules:
@@ -18,199 +16,16 @@ default:
 
 variables:
   MAVEN_OPTS: "-Dmaven.repo.local=$CI_PROJECT_DIR/.m2/repository"
+  # Имя уже существующего кластера (его готовит оператор снаружи) — нужно только
+  # чтобы получить kubeconfig через `yc get-credentials`.
+  CLUSTER_NAME: "otus-ms-cluster"
+  # Внешний ingress-хост приложения (задаёт оператор в переменных GitLab).
+  # INGRESS_HOST не задаём здесь ищет значение из настроек CI/CD.
 
 stages:
-  - validate
-  - plan
-  - apply
-  - bootstrap
-  - infrastructure
   - build
-  - test
   - image
   - deploy
-  - destroy
-
-# --- Правила запуска ---------------------------------------------------------
-# Jobs не фильтруются по изменённым файлам: весь pipeline виден на любом коммите
-# (инфраструктура идёт раньше приложения за счёт порядка стадий). when: always
-# означает «создавать job всегда». Деструктивные/требующие кластера jobs остаются
-# manual на уровне конкретных jobs (terraform_apply, deploy_application,
-# terraform_destroy).
-.infra-rules: &infra_rules
-  - when: always
-
-.app-rules: &app_rules
-  - when: always
-
-# --- Terraform ---------------------------------------------------------------
-.tf-base:
-  image:
-    name: hashicorp/terraform:1.9
-    entrypoint: [""]
-  rules: *infra_rules
-  variables:
-    TF_IN_AUTOMATION:     "1"
-    TF_VAR_yc_cloud_id:   "$YC_CLOUD_ID"
-    TF_VAR_yc_folder_id:  "$YC_FOLDER_ID"
-  before_script:
-    # YC_SA_KEY — переменная типа File: GitLab сохраняет JSON-ключ во временный
-    # файл и возвращает путь к нему.
-    - export YC_SERVICE_ACCOUNT_KEY_FILE="$YC_SA_KEY"
-    # Ключи Object Storage передаём через переменные окружения AWS SDK (в state
-    # они не попадают).
-    - export AWS_ACCESS_KEY_ID="$YC_ACCESS_KEY_ID"
-    - export AWS_SECRET_ACCESS_KEY="$YC_SECRET_ACCESS_KEY"
-    - export TF_CLI_CONFIG_FILE="$CI_PROJECT_DIR/terraform/terraform.rc"
-
-terraform_validate:
-  extends: .tf-base
-  stage: validate
-  # Первый инфраструктурный job — запускается вручную. Дальше инфраструктурная
-  # цепочка идёт автоматически, каждый job ждёт предыдущий через needs.
-  rules:
-    - when: manual
-  script:
-    - cd terraform
-    - terraform fmt -check
-    - terraform init -backend=false
-    - terraform validate
-
-terraform_plan:
-  extends: .tf-base
-  stage: plan
-  needs: [terraform_validate]
-  script:
-    - cd terraform
-    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
-    - terraform plan -out=tfplan
-  artifacts:
-    paths:
-      - terraform/tfplan
-
-# terraform_apply — авто, ждёт terraform_plan (tfplan-артефакт). CLUSTER_ID идёт в
-# job установки агента через dotenv.
-terraform_apply:
-  extends: .tf-base
-  stage: apply
-  needs: [terraform_plan]
-  environment: { name: infrastructure }
-  resource_group: terraform
-  script:
-    - cd terraform
-    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
-    - terraform apply -input=false tfplan
-    - echo "CLUSTER_ID=$(terraform output -raw cluster_id)" > cluster.env
-  artifacts:
-    reports:
-      dotenv: terraform/cluster.env
-
-# terraform_destroy — manual. Полностью удаляет облачные ресурсы (кластер,
-# сеть, SA, IAM). Запускается только вручную (rules, а не job-level when, т.к.
-# правила из .tf-base имели бы приоритет).
-terraform_destroy:
-  extends: .tf-base
-  stage: destroy
-  # needs: [] отвязывает от порядка стадий — job запускается вручную сразу,
-  # не дожидаясь предыдущих стадий; независим от цепочки (state из remote backend).
-  needs: []
-  rules:
-    - when: manual
-  resource_group: terraform
-  environment: { name: infrastructure }
-  script:
-    - cd terraform
-    - terraform init -reconfigure "-backend-config=bucket=$TF_STATE_BUCKET"
-    - terraform destroy -auto-approve
-
-# --- Bootstrap: установка GitLab Agent ---------------------------------------
-# Временный kubeconfig (0600, из лога скрыт, удаляется в after_script). Дальше
-# доступ к K8s — только через GitLab Agent и KUBE_CONTEXT.
-install_gitlab_agent:
-  stage: bootstrap
-  image:
-    name: dtzar/helm-kubectl:3
-    entrypoint: [""]
-  rules: *infra_rules
-  needs:
-    - job: terraform_apply
-      artifacts: true
-  environment: { name: dev }
-  resource_group: k8s
-  variables:
-    KUBECONFIG: "$CI_PROJECT_DIR/kubeconfig"
-  before_script:
-    - curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh
-        | bash -s -- -i /opt/yc -n >/dev/null
-    - export PATH="/opt/yc/bin:$PATH"
-  script:
-    - yc config profile create ci || true
-    - yc config profile activate ci
-    - yc config set folder-id           "$YC_FOLDER_ID"
-    - yc config set service-account-key "$YC_SA_KEY"
-    - |
-      umask 077
-      yc managed-kubernetes cluster get-credentials \
-        --id "$CLUSTER_ID" --external --force --kubeconfig "$KUBECONFIG"
-      chmod 600 "$KUBECONFIG"
-    - helm repo add gitlab https://charts.gitlab.io && helm repo update gitlab
-    - |
-      helm upgrade --install otus-agent gitlab/gitlab-agent \
-        -n gitlab-agent --create-namespace --version 2.33.0 \
-        --set image.tag=v19.5.0 \
-        --set config.token="$GITLAB_AGENT_TOKEN" \
-        --set config.kasAddress="$GITLAB_KAS_ADDRESS" \
-        --wait --timeout 5m
-    - kubectl -n gitlab-agent rollout status deployment/otus-agent-gitlab-agent --timeout=2m
-  after_script:
-    - rm -f "$CI_PROJECT_DIR/kubeconfig"
-
-# --- Cluster components ------------------------------------------------------
-install_cluster_components:
-  stage: infrastructure
-  image:
-    name: dtzar/helm-kubectl:3
-    entrypoint: [""]
-  rules: *infra_rules
-  needs: [install_gitlab_agent]
-  environment: { name: dev }
-  resource_group: k8s
-  variables:
-    KUBE_CONTEXT: "$CI_PROJECT_PATH:otus-agent"
-  script:
-    - helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
-    - helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-    - helm repo add grafana https://grafana.github.io/helm-charts
-    - helm repo update
-    # ingress-nginx: дождаться внешнего IP LB (нужен для nip.io-хостов ниже).
-    - |
-      helm upgrade --install ingress-nginx ingress-nginx/ingress-nginx \
-        -n ingress-nginx --create-namespace --version 4.15.1 \
-        -f helm/monitoring/values-ingress-nginx.yaml --wait --timeout 10m
-      kubectl --context "$KUBE_CONTEXT" -n ingress-nginx wait \
-        --for=jsonpath='{.status.loadBalancer.ingress}' \
-        svc/ingress-nginx-controller --timeout=5m
-      LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
-             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-    # kube-prometheus-stack: дождаться готовности CRD мониторинга — они нужны для
-    # ServiceMonitor'ов приложения.
-    - |
-      helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
-        -n monitoring --create-namespace --version 69.8.2 \
-        -f helm/monitoring/values-kube-prometheus-stack.yaml \
-        --set "grafana.ingress.hosts[0]=grafana.$LB.nip.io" \
-        --wait --timeout 10m
-      kubectl --context "$KUBE_CONTEXT" wait --for=condition=Established \
-        crd/servicemonitors.monitoring.coreos.com --timeout=2m
-    # Loki + Alloy (namespace logging).
-    - |
-      helm upgrade --install loki grafana/loki \
-        -n logging --create-namespace --version 6.55.0 \
-        -f helm/monitoring/values-loki.yaml --wait --timeout 10m
-      helm upgrade --install alloy grafana/alloy \
-        -n logging --create-namespace --version 1.15.0 \
-        --set image.tag=v1.21.3 \
-        -f helm/monitoring/values-alloy.yaml --wait --timeout 5m
 
 # --- Приложение --------------------------------------------------------------
 # Все команды — в Makefile. В Alpine-образах ниже make/curl ставятся отдельно.
@@ -218,13 +33,15 @@ build_application:
   stage: build
   image: maven:3.9-eclipse-temurin-21
   # Первый прикладной job — запускается вручную; дальше app-цепочка идёт
-  # автоматически, каждый job ждёт предыдущий через needs.
-  # Кросс-гейт: приложение не стартует, пока вся цепочка инфраструктуры
-  # не завершилась успешно (needs по умолчанию = только после успеха).
-  needs: [install_cluster_components]
+  # автоматически, каждый job ждёт предыдущий через `needs` у следующих jobs.
   rules:
     - when: manual
   cache: { key: maven, paths: [.m2/repository] }
+  # В образе maven:* на Debian slim нет make — ставим, иначе `make build`
+  # падает с `make: command not found` (exit 127). Alpine-джобы (build_images,
+  # deploy_application) делают то же самое через `apk add`.
+  before_script:
+    - apt-get update -qq && apt-get install -y --no-install-recommends make
   script:
     - make build
   artifacts:
@@ -232,49 +49,60 @@ build_application:
       - application/user-service/target/app.jar
       - application/client-service/target/app.jar
 
-test_application:
-  stage: test
-  image: maven:3.9-eclipse-temurin-21
-  rules: *app_rules
-  needs: [build_application]
-  cache: { key: maven, paths: [.m2/repository], policy: pull }
-  script:
-    - make test
-
-# Публикация образов — только после успешных сборки И тестов.
+# Публикация образов — только после успешной сборки.
 build_images:
   stage: image
   image: docker:27
   services: [docker:27-dind]
-  rules: *app_rules
-  needs: [build_application, test_application]
+  needs: [build_application]
   timeout: 30m
   before_script:
     - apk add --no-cache make
   variables:
-    DOCKER_TLS_CERTDIR: "/certs"
+    # DOCKER_TLS_CERTDIR="" принудительно отключает TLS у dind-демона: он
+    # слушает 0.0.0.0:2375 без сертификатов. Обходной путь для связок, где
+    # авто-вайринг GitLab Runner (DOCKER_HOST=tcp://docker:2376 +
+    # DOCKER_CERT_PATH=/certs/client) не срабатывает. Требует `privileged=true`
+    # на Runner'е.
+    # ВАЖНО: DOCKER_TLS_VERIFY и DOCKER_CERT_PATH здесь НИ В КОЕМ СЛУЧАЕ не
+    # задаём (даже как ""). Docker CLI включает TLS по факту «переменная
+    # определена и непустая», поэтому "0" для него == "1"; при DOCKER_TLS_VERIFY=0
+    # клиент пойдёт искать /root/.docker/ca.pem и упадёт с
+    # `unable to resolve docker endpoint: open /root/.docker/ca.pem`.
+    DOCKER_HOST: "tcp://docker:2375"
+    DOCKER_TLS_CERTDIR: ""
   script:
+    - docker version  # быстрый self-check, что клиент видит 2375 dind
     - make docker-build docker-push
 
-# Установка приложения: helm-релиз в namespace dev через GitLab Agent.
-# Авто: ждёт build_images (needs) и идёт последним в прикладной цепочке. Кластер,
-# ingress и его внешний IP считаются подготовленными инфраструктурной цепочкой.
+# Установка приложения: helm-релиз в namespace dev. Ждёт build_images (needs).
+# Доступ к кластеру — временный kubeconfig от YC-SA (кластер и ingress готовы
+# снаружи). INGRESS_HOST берётся из переменной CI/CD.
 deploy_application:
   stage: deploy
   image:
     name: dtzar/helm-kubectl:3
     entrypoint: [""]
   needs: [build_images]
-  rules: *app_rules
   environment: { name: dev }
+  resource_group: cluster
+  # Доступ к кластеру — временный kubeconfig от YC-SA.
+  # KUBE_CONTEXT="" -> make app-deploy не добавляет --kube-context, helm берёт
+  # current-context из $KUBECONFIG.
+  variables:
+    KUBECONFIG: "$CI_PROJECT_DIR/kubeconfig"
+    KUBE_CONTEXT: ""
   before_script:
     - apk add --no-cache make curl
-  variables:
-    KUBE_CONTEXT: "$CI_PROJECT_PATH:otus-agent"
+    - curl -fsSL https://storage.yandexcloud.net/yandexcloud-yc/install.sh | bash -s -- -i /opt/yc -n >/dev/null
+    - export PATH="/opt/yc/bin:$PATH"
+    - yc config profile create ci >/dev/null 2>&1 || true
+    - yc config profile activate ci
+    - yc config set folder-id "$YC_FOLDER_ID"
+    - yc config set service-account-key "$YC_SA_KEY"
+    - umask 077 && yc managed-kubernetes cluster get-credentials --name "$CLUSTER_NAME" --external --force --kubeconfig "$KUBECONFIG"
+  after_script:
+    - rm -f "$KUBECONFIG"
   script:
-    - |
-      LB=$(kubectl --context "$KUBE_CONTEXT" -n ingress-nginx get svc ingress-nginx-controller \
-             -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
-      test -n "$LB"
-      export INGRESS_HOST="app.$LB.nip.io"
-      make app-deploy app-smoke
+    - test -n "$INGRESS_HOST" || { echo "INGRESS_HOST не задан в переменных CI/CD"; exit 1; }
+    - make app-deploy app-smoke

@@ -10,10 +10,10 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update
-    show-sql: true
+    # show-sql выключен: SQL идёт в System.out и ломал бы JSON-поток логов Loki.
+    show-sql: false
     properties:
       hibernate:
-        format_sql: true
         dialect: org.hibernate.dialect.H2Dialect
     open-in-view: false
 
@@ -36,4 +36,20 @@ management:
       enabled: true
     readinessstate:
       enabled: true
+  metrics:
+    # Общий тег application позволяет Grafana/Prometheus различать сервисы.
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        # Гистограмма задержек HTTP — для p50/p95/p99 latency-панелей в Grafana.
+        http.server.requests: true
+
+# Логи структурированным JSON (ECS) в stdout — Loki/Alloy собирают stdout пода,
+# Grafana извлекает service.name (= spring.application.name) как метку потока.
+logging:
+  structured:
+    format:
+      console: ecs
+
 
