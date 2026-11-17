@@ -39,6 +39,7 @@ public class UserClientService {
     }
 
     public UserDTO getUserById(Long id) {
+        proxyRequests.increment();
         return restClient.get()
                 .uri("/users/{id}", id)
                 .retrieve()
@@ -46,6 +47,7 @@ public class UserClientService {
     }
 
     public UserDTO createUser(UserDTO userDTO) {
+        proxyRequests.increment();
         return restClient.post()
                 .uri("/users")
                 .body(userDTO)
@@ -54,6 +56,7 @@ public class UserClientService {
     }
 
     public UserDTO updateUser(Long id, UserDTO userDTO) {
+        proxyRequests.increment();
         return restClient.put()
                 .uri("/users/{id}", id)
                 .body(userDTO)
@@ -62,6 +65,7 @@ public class UserClientService {
     }
 
     public ResponseEntity<Void> deleteUser(Long id) {
+        proxyRequests.increment();
         return restClient.delete()
                 .uri("/users/{id}", id)
                 .retrieve()

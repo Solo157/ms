@@ -25,13 +25,13 @@ spec:
               containerPort: {{ .Values.clientService.port }}
           env:
             - name: USER_SERVICE_URL
-              value: "http://user-service:8081"
+              value: "http://{{ .Values.userService.name }}:{{ .Values.userService.port }}"
           readinessProbe:
-            httpGet: { path: /actuator/health/readiness, port: 8082 }
+            httpGet: { path: /actuator/health/readiness, port: http }
             initialDelaySeconds: 10
             periodSeconds: 5
           livenessProbe:
-            httpGet: { path: /actuator/health/liveness, port: 8082 }
+            httpGet: { path: /actuator/health/liveness, port: http }
             initialDelaySeconds: 20
             periodSeconds: 10
           resources:

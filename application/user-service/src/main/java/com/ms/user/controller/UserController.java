@@ -10,7 +10,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.*;
 
 @RestController
-@RequestMapping()
 public class UserController {
 
     private final UserService userService;
@@ -21,7 +20,7 @@ public class UserController {
 
     @GetMapping("/health")
     public ResponseEntity<Map<String, String>> health() {
-        return ResponseEntity.status(HttpStatus.OK).body(Map.of("status", "OK"));
+        return ResponseEntity.ok(Map.of("status", "OK"));
     }
 
     @GetMapping("/users")

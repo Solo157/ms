@@ -11,14 +11,13 @@ import java.util.List;
 import java.util.Map;
 
 @RestController
-@RequestMapping()
 public class UserProxyController {
 
     private final UserClientService userClientService;
 
     @GetMapping("/health")
     public ResponseEntity<Map<String, String>> health() {
-        return ResponseEntity.status(HttpStatus.OK).body(Map.of("status", "OK"));
+        return ResponseEntity.ok(Map.of("status", "OK"));
     }
 
     public UserProxyController(UserClientService userClientService) {

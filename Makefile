@@ -35,7 +35,7 @@ MAVEN := mvn --batch-mode --errors -ntp
 .PHONY: build test docker-build docker-push app-deploy app-smoke helm-lint helm-template
 
 build:
-	cd application && $(MAVEN) -DskipTests package
+	cd application && $(MAVEN) package
 
 test:
 	cd application && $(MAVEN) test
